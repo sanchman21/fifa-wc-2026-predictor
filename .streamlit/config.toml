@@ -1,0 +1,13 @@
+# Streamlit theme + runtime settings (applied automatically on Streamlit Community Cloud).
+[theme]
+primaryColor = "#c8102e"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f4f6"
+textColor = "#1a1a1a"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

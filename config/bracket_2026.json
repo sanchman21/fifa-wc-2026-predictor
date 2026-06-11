@@ -1,0 +1,45 @@
+{
+  "description": "Official FIFA World Cup 2026 knockout bracket. 12 group winners (1X), 12 runners-up (2X) and the 8 best third-placed teams (3:groups) feed the Round of 32. Slot codes: '1A'=winner group A, '2A'=runner-up group A, '3:A/B/C/D/F'=a 3rd-placed team from one of those groups (assigned by the best-third allocation), 'W74'=winner of match 74.",
+  "round_of_32": [
+    {"match": 73, "home": "2A", "away": "2B"},
+    {"match": 74, "home": "1E", "away": "3:A/B/C/D/F"},
+    {"match": 75, "home": "1F", "away": "2C"},
+    {"match": 76, "home": "1C", "away": "2F"},
+    {"match": 77, "home": "1I", "away": "3:C/D/F/G/H"},
+    {"match": 78, "home": "2E", "away": "2I"},
+    {"match": 79, "home": "1A", "away": "3:C/E/F/H/I"},
+    {"match": 80, "home": "1L", "away": "3:E/H/I/J/K"},
+    {"match": 81, "home": "1D", "away": "3:B/E/F/I/J"},
+    {"match": 82, "home": "1G", "away": "3:A/E/H/I/J"},
+    {"match": 83, "home": "2K", "away": "2L"},
+    {"match": 84, "home": "1H", "away": "2J"},
+    {"match": 85, "home": "1B", "away": "3:E/F/G/I/J"},
+    {"match": 86, "home": "1J", "away": "2H"},
+    {"match": 87, "home": "1K", "away": "3:D/E/I/J/L"},
+    {"match": 88, "home": "2D", "away": "2G"}
+  ],
+  "round_of_16": [
+    {"match": 89, "home": "W74", "away": "W77"},
+    {"match": 90, "home": "W73", "away": "W75"},
+    {"match": 91, "home": "W76", "away": "W78"},
+    {"match": 92, "home": "W79", "away": "W80"},
+    {"match": 93, "home": "W83", "away": "W84"},
+    {"match": 94, "home": "W81", "away": "W82"},
+    {"match": 95, "home": "W86", "away": "W88"},
+    {"match": 96, "home": "W85", "away": "W87"}
+  ],
+  "quarter_finals": [
+    {"match": 97, "home": "W89", "away": "W90"},
+    {"match": 98, "home": "W91", "away": "W92"},
+    {"match": 99, "home": "W93", "away": "W94"},
+    {"match": 100, "home": "W95", "away": "W96"}
+  ],
+  "semi_finals": [
+    {"match": 101, "home": "W97", "away": "W98"},
+    {"match": 102, "home": "W99", "away": "W100"}
+  ],
+  "final": [
+    {"match": 104, "home": "W101", "away": "W102"}
+  ],
+  "third_place_allocation_note": "FIFA uses a fixed 495-row lookup table mapping the set of 8 groups whose 3rd-placed teams qualify to the specific R32 slots. This project reproduces a VALID allocation via constraint matching (each 3rd-place slot lists its eligible groups; the 8 qualified thirds are assigned so no team meets a side from its own group and every slot is filled). The set of teams a given 3rd-placed team can meet is exactly correct; the precise slot may differ from FIFA's table in rare combinations."
+}

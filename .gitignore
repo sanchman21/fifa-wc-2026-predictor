@@ -1,0 +1,12 @@
+# Data IS committed for reliable cloud cold-starts (see DEPLOY.md).
+# Generated outputs are not.
+output/*.csv
+output/*.png
+output/*.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
