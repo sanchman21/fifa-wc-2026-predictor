@@ -53,6 +53,12 @@ def load_results() -> pd.DataFrame:
     return df
 
 
+def load_results_raw() -> pd.DataFrame:
+    """All results INCLUDING unplayed fixtures (NaN scores) — used to read the 2026 schedule."""
+    path = os.path.join(DATA_DIR, "results.csv")
+    return pd.read_csv(path, parse_dates=["date"]).sort_values("date").reset_index(drop=True)
+
+
 def load_shootouts() -> pd.DataFrame:
     path = os.path.join(DATA_DIR, "shootouts.csv")
     if not os.path.exists(path):

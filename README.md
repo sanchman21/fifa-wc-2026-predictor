@@ -79,11 +79,24 @@ winner/runner-up probabilities sum to 1; advancement is monotone per team.
 
 ---
 
+## Match predictions & live updating
+- **Per-match predictions** (`src/model/predict.py`, UI **Match Predictor** tab): pick any two
+  teams (or filter the real 2026 fixture list) for win/draw/loss, expected goals and the most
+  likely scorelines — same Dixon-Coles math the simulator uses.
+- **Live updating as the tournament progresses:**
+  - **Real results** — click **🔄 Refresh data** (or `python -m src.main --refresh`). martj42's
+    `results.csv`/`goalscorers.csv` fill in actual scores and goals live, so Elo, attacking
+    talent, form and coaching all re-derive, and the simulation **conditions on every played
+    match** (played group games are fixed; decided knockout ties are locked by team identity).
+  - **What-if** (UI **Live / What-if** tab) — type in hypothetical group scores and recompute
+    instantly to see how qualification and title odds shift, before any real data exists.
+
 ## Interactive UI (`streamlit run app.py`)
-Tabs: **Overview** (title odds) · **Model & Weights** (learned weights + validation vs Elo-only)
-· **Power Ratings** (per-team factor attribution) · **Groups** · **Knockouts** (stage heatmap,
-predicted bracket) · **Players** (top scorers, attack-talent ranks) · **Managers** (tenure +
-coaching effect) · **Data** (downloadable tables). Training is cached; re-simulate from the sidebar.
+Ten tabs: **Overview** · **Match Predictor** · **Live / What-if** · **Model & Weights**
+(learned weights + validation vs Elo-only) · **Power Ratings** (per-team factor attribution) ·
+**Groups** · **Knockouts** (stage heatmap, predicted bracket) · **Players** (top scorers,
+attack-talent ranks) · **Managers** (tenure + coaching effect) · **Data** (downloads). Training
+is cached; re-simulate, predict matches, refresh to live scores, or run what-ifs from the UI.
 
 ---
 

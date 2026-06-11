@@ -15,9 +15,10 @@ import time
 
 from .data import fetch_data
 from .data.config_loader import (DATA_DIR, load_bracket, load_managers, load_results,
-                                 load_teams)
+                                 load_results_raw, load_shootouts, load_teams)
 from .explain import report
 from .features.elo import compute_elo
+from .features.fixtures import known_group_results, known_knockout_results, wc2026_matches
 from .features.players import load_goals
 from .model.tournament import TournamentSimulator
 from .model.train import build_power_table, current_factor_table, train
@@ -50,15 +51,26 @@ def prepare_model(refresh=False, verbose=True):
 
     factors = current_factor_table(teams, elo, elo.pre, goals, appts, REF_DATE)
     power = build_power_table(teams, factors, model)
+
+    fixtures = wc2026_matches(load_results_raw(), teams)
+    known = known_group_results(fixtures)
+    known_ko = known_knockout_results(fixtures, teams, load_shootouts())
+    if known or known_ko:
+        log(f"[live] conditioning on {len(known)} group + {len(known_ko)} knockout result(s)")
     return dict(teams=teams, managers=managers, results=results, goals=goals, elo=elo,
-                model=model, power=power, bracket=bracket)
+                model=model, power=power, bracket=bracket, fixtures=fixtures,
+                known_group=known, known_knockout=known_ko)
 
 
-def run_simulation(prep, sims=20000, seed=2026):
+def run_simulation(prep, sims=20000, seed=2026, known_group=None, forced_knockout=None):
+    """Simulate; by default conditions on real played matches (prep['known_*']).
+    Pass known_group / forced_knockout explicitly (e.g. what-if scores) to override."""
+    kg = prep.get("known_group", {}) if known_group is None else known_group
+    ko = prep.get("known_knockout", {}) if forced_knockout is None else forced_knockout
     sim = TournamentSimulator(prep["power"], prep["teams"], prep["bracket"], elo_per_goal=1.0,
                               total_goals=prep["model"].total_goals, host_adv=prep["model"].beta_home,
                               rho=prep["model"].rho, pen_k=0.4)
-    return sim.run(n_sims=sims, seed=seed), sim.chalk_bracket()
+    return sim.run(n_sims=sims, seed=seed, known_group=kg, forced_knockout=ko), sim.chalk_bracket()
 
 
 def build_forecast(sims=20000, seed=2026, refresh=False, verbose=True):

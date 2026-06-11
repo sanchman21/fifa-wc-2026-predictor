@@ -114,10 +114,22 @@ class TournamentSimulator:
                         np.where(ga > gh, away_idx,
                                  np.where(pen_home, home_idx, away_idx)))
 
-    def run(self, n_sims=20000, seed=2026):
+    def run(self, n_sims=20000, seed=2026, known_group=None, forced_knockout=None):
+        """known_group: {(home,away):(hs,as)} played group matches to FIX.
+        forced_knockout: {match_id: winning_team_name} decided knockout ties to LOCK."""
         rng = np.random.default_rng(seed)
         n = n_sims
         nteams = len(self.team_names)
+
+        # normalize known group results to both orientations, keyed by (name_i, name_j)
+        known = {}
+        for (h, a), (hs, as_) in (known_group or {}).items():
+            known[(h, a)] = (hs, as_); known[(a, h)] = (as_, hs)
+        # decided knockout ties: (teamA, teamB) -> winner, matched by team identity wherever
+        # those two teams meet in the bracket (no match-id needed)
+        forced_pairs = [(self.idx[x], self.idx[y], self.idx[w])
+                        for (x, y), w in (forced_knockout or {}).items()
+                        if x in self.idx and y in self.idx and w in self.idx]
 
         winners = {}   # group letter -> (n,) global idx
         runners = {}
@@ -130,10 +142,15 @@ class TournamentSimulator:
             pts = np.zeros((4, n)); gd = np.zeros((4, n)); gf = np.zeros((4, n))
             for (a, b) in _PAIRS:
                 ia, ib = t[a], t[b]
-                net = self.host_adv * (float(self.host[ia]) - float(self.host[ib]))
-                la, lb = expected_goals(self.R[ia], self.R[ib], self.elo_per_goal,
-                                        self.total_goals, net)
-                ga = rng.poisson(la, n); gb = rng.poisson(lb, n)
+                key = (self.team_names[ia], self.team_names[ib])
+                if key in known:                       # FIX a played match (constant scores)
+                    sa, sb = known[key]
+                    ga = np.full(n, sa); gb = np.full(n, sb)
+                else:
+                    net = self.host_adv * (float(self.host[ia]) - float(self.host[ib]))
+                    la, lb = expected_goals(self.R[ia], self.R[ib], self.elo_per_goal,
+                                            self.total_goals, net)
+                    ga = rng.poisson(la, n); gb = rng.poisson(lb, n)
                 # points
                 pts[a] += np.where(ga > gb, 3, np.where(ga == gb, 1, 0))
                 pts[b] += np.where(gb > ga, 3, np.where(gb == ga, 1, 0))
@@ -201,21 +218,28 @@ class TournamentSimulator:
                 return None  # handled via third_for_slot keyed by match id
             return slot_team[code]
 
+        def _apply_forced(home, away, w):
+            for a, b, fw in forced_pairs:              # lock a decided tie wherever it occurs
+                w = np.where(((home == a) & (away == b)) | ((home == b) & (away == a)), fw, w)
+            return w
+
         # Round of 32
         for m in self.bracket["round_of_32"]:
             home = resolve_side(m["home"])
             away = (third_for_slot[m["match"]] if str(m["away"]).startswith("3:")
                     else resolve_side(m["away"]))
-            match_winner[m["match"]] = self._play_knockout(home, away, rng)
-            np.add.at(reach["R16"], match_winner[m["match"]], 1)
+            w = _apply_forced(home, away, self._play_knockout(home, away, rng))
+            match_winner[m["match"]] = w
+            np.add.at(reach["R16"], w, 1)
 
         for rnd, key in [("round_of_16", "QF"), ("quarter_finals", "SF"),
                          ("semi_finals", "Final"), ("final", "Champion")]:
             for m in self.bracket[rnd]:
                 home = resolve_side(m["home"])
                 away = resolve_side(m["away"])
-                match_winner[m["match"]] = self._play_knockout(home, away, rng)
-                np.add.at(reach[key], match_winner[m["match"]], 1)
+                w = _apply_forced(home, away, self._play_knockout(home, away, rng))
+                match_winner[m["match"]] = w
+                np.add.at(reach[key], w, 1)
 
         # ---------------- assemble probability table ----------------
         out = pd.DataFrame(index=self.team_names)
