@@ -1,8 +1,11 @@
 # Deploying to Streamlit Community Cloud (free)
 
 This app is ready to host for free on **Streamlit Community Cloud**. The match/goal data is
-committed into `data/`, so there is **no network dependency at boot** — cold starts are fast
-and reliable.
+committed into `data/`, so the core forecast has **no network dependency at boot**. The EA player
+ratings that power the **squad-skill** factor are *not* committed (the historical file is ~96 MB);
+they're fetched on cold start instead — the current ratings and the official squads need no auth,
+and the historical EA editions use your Kaggle token from **Secrets** (see below). If a fetch is
+unavailable, the app still boots and the skill factor falls back gracefully.
 
 ## One-time: push to GitHub
 
@@ -31,10 +34,19 @@ gh repo create fifa-wc-2026-predictor --public --source . --push
    - **Branch:** `main`
    - **Main file path:** `app.py`
 4. **Advanced settings → Python version: 3.12** (matches development; avoids wheel issues).
-5. Click **Deploy**. First build installs `requirements.txt` (~1–2 min). You get a public
+5. **Advanced settings → Secrets** — paste your Kaggle credentials so the squad-skill factor can
+   download its historical training data on cold start:
+   ```toml
+   KAGGLE_USERNAME = "your_kaggle_username"
+   KAGGLE_KEY = "your_kaggle_api_key"
+   ```
+   (Optional — without them the app still runs; the skill factor falls back to neutral. The
+   official squads need no key.)
+6. Click **Deploy**. First build installs `requirements.txt` (~1–2 min). You get a public
    `https://<something>.streamlit.app` URL.
 
 That's it. To update the live app, just `git push` — Streamlit Cloud redeploys automatically.
+Secrets are stored encrypted by Streamlit and are **never** part of your Git repo.
 
 ## What to expect on the free tier
 

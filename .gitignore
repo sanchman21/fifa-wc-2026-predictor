@@ -4,6 +4,21 @@ output/*.csv
 output/*.png
 output/*.md
 
+# Secrets — never commit. The Kaggle token lives here.
+.env
+.env.*
+!.env.example
+kaggle.json
+.kaggle/
+
+# EA player-rating data is re-fetchable (current: no-auth GitHub; legacy: Kaggle via token)
+# and the legacy file is ~96MB, so it's fetched on cold-start rather than committed.
+data/ea_players_legacy.csv
+data/ea_players_current.csv
+
+# Assistant memory must never be committed to the project repo
+/memory/
+
 # Python
 __pycache__/
 *.pyc
