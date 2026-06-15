@@ -13,13 +13,14 @@ import os
 import sys
 import time
 
-from .data import fetch_data
+from .data import fetch_data, fetch_skills, fetch_squads
 from .data.config_loader import (DATA_DIR, load_bracket, load_managers, load_results,
                                  load_results_raw, load_shootouts, load_teams)
 from .explain import report
 from .features.elo import compute_elo
 from .features.fixtures import known_group_results, known_knockout_results, wc2026_matches
 from .features.players import load_goals
+from .features.skills import current_squads, squads_meta
 from .model.tournament import TournamentSimulator
 from .model.train import build_power_table, current_factor_table, train
 
@@ -34,6 +35,8 @@ def prepare_model(refresh=False, verbose=True):
             print(msg)
 
     fetch_data.fetch_all(force=refresh)
+    fetch_skills.fetch_all(force=refresh)    # EA player ratings for the squad-skill factor
+    fetch_squads.fetch_squads(force=refresh) # official 26-man squads (Wikipedia, no auth)
     teams = load_teams(); bracket = load_bracket(); managers = load_managers()
     results = load_results()
     goals = load_goals(results, os.path.join(DATA_DIR, "goalscorers.csv"))
@@ -49,8 +52,15 @@ def prepare_model(refresh=False, verbose=True):
     log(f"[train] learned weights on {model.n_train:,} matches | "
         + " ".join(f"{k}={v:.0%}" for k, v in model.weights.items()))
 
+    # Squad-skill uses the OFFICIAL 26-man squads: current_squads() reads the Wikipedia cache and
+    # matches each selected player to his EA rating, so only players actually called up count
+    # (current_factor_table -> current_skill_factors -> current_squads). If the cache is absent it
+    # falls back to each nation's top-rated EA players.
+    squads = current_squads()
     factors = current_factor_table(teams, elo, elo.pre, goals, appts, REF_DATE)
     power = build_power_table(teams, factors, model)
+    official = sum(1 for sq in squads.values() if len(sq) and bool(sq["callup"].iloc[0]))
+    log(f"[squads] squad-skill from official lists for {official}/{len(teams)} teams")
 
     fixtures = wc2026_matches(load_results_raw(), teams)
     known = known_group_results(fixtures)
@@ -58,8 +68,8 @@ def prepare_model(refresh=False, verbose=True):
     if known or known_ko:
         log(f"[live] conditioning on {len(known)} group + {len(known_ko)} knockout result(s)")
     return dict(teams=teams, managers=managers, results=results, goals=goals, elo=elo,
-                model=model, power=power, bracket=bracket, fixtures=fixtures,
-                known_group=known, known_knockout=known_ko)
+                model=model, power=power, bracket=bracket, fixtures=fixtures, appts=appts,
+                squads=squads, squads_meta=squads_meta(), known_group=known, known_knockout=known_ko)
 
 
 def run_simulation(prep, sims=20000, seed=2026, known_group=None, forced_knockout=None):

@@ -13,7 +13,7 @@ from ..model.train import FACTORS, FACTOR_LABELS
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "output")
 _COLORS = {"elo": "#1f77b4", "attack_talent": "#ff7f0e", "wc_player": "#9467bd",
-           "form": "#d62728", "coach": "#2ca02c"}
+           "form": "#d62728", "skill": "#17becf", "coach": "#2ca02c"}
 
 
 def _ensure_out():

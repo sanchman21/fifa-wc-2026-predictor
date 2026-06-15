@@ -12,8 +12,9 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from src.data import fetch_data
+from src.data import fetch_data, fetch_skills, fetch_squads
 from src.features.players import top_scorers
+from src.features.skills import DEFAULT_OVERALL, squad_rating
 from src.main import prepare_model, run_simulation
 from src.model.predict import predict_fixtures, predict_match
 from src.model.train import FACTORS, FACTOR_LABELS
@@ -45,6 +46,7 @@ prep = _prep()
 teams, model, power, goals, managers, results, fixtures = (
     prep["teams"], prep["model"], prep["power"], prep["goals"],
     prep["managers"], prep["results"], prep["fixtures"])
+squads, squads_info = prep["squads"], prep["squads_meta"]
 
 st.title("🏆 FIFA World Cup 2026 — Explainable Forecast")
 st.caption(f"48 teams · weights LEARNED from {model.n_train:,} matches · "
@@ -53,8 +55,10 @@ st.caption(f"48 teams · weights LEARNED from {model.n_train:,} matches · "
 with st.sidebar:
     st.header("Controls")
     if st.button("🔄 Refresh data (pull latest scores)", use_container_width=True):
-        with st.spinner("Downloading latest results & goals…"):
+        with st.spinner("Downloading latest results, goals, squad ratings & official squads…"):
             fetch_data.fetch_all(force=True)
+            fetch_skills.fetch_all(force=True)
+            fetch_squads.fetch_squads(force=True)   # refresh official 26-man squads
         _prep.clear(); _sim.clear()
         st.rerun()
     sims = st.select_slider("Simulations", [5000, 10000, 20000, 30000, 50000], value=20000)
@@ -71,7 +75,7 @@ probs, chalk = _sim(int(sims), int(seed))
 
 tabs = st.tabs(["🏆 Overview", "🔮 Match Predictor", "📡 Live / What-if", "📊 Model & Weights",
                 "💪 Power Ratings", "🅰️ Groups", "🗺️ Knockouts", "⚽ Players",
-                "🧑‍💼 Managers", "📥 Data"])
+                "🩹 Squad", "🧑‍💼 Managers", "📥 Data"])
 
 # ---------------------------------------------------------------- Overview
 with tabs[0]:
@@ -155,10 +159,11 @@ with tabs[3]:
     st.subheader("The weights are trained, not chosen")
     st.markdown(
         f"Each factor is computed **as of every match's date** over **{model.n_train:,} "
-        "internationals since 2011**. Because Elo, form, attacking talent and coaching overlap, a "
-        "plain regression would hand Elo almost everything — so we use **Shapley / LMG "
-        "relative-importance decomposition**, the standard way to fairly split shared predictive "
-        "credit among correlated factors.")
+        "internationals since 2011** (squad skill uses the EA edition active at kickoff). Because "
+        "Elo, form, attacking talent, squad skill and coaching overlap, a plain regression would "
+        "hand Elo almost everything — so we use **Shapley / LMG relative-importance "
+        "decomposition**, the standard way to fairly split shared predictive credit among "
+        "correlated factors.")
     wdf = pd.DataFrame({"factor": [FACTOR_LABELS[f] for f in FACTORS],
                         "weight": [model.weights[f] for f in FACTORS],
                         "coef_goals_per_SD": [model.betas[f] for f in FACTORS]}).sort_values("weight", ascending=False)
@@ -184,7 +189,7 @@ with tabs[4]:
     st.subheader("Composite power rating & factor attribution")
     show = power[["rank", "group", "power_index"] + FACTORS].copy()
     st.dataframe(show.style.format({"power_index": "{:.1f}", "elo": "{:.0f}", "attack_talent": "{:.1f}",
-                 "wc_player": "{:.1f}", "form": "{:.2f}", "coach": "{:+.3f}"}),
+                 "wc_player": "{:.1f}", "form": "{:.2f}", "skill": "{:.1f}", "coach": "{:+.3f}"}),
                  use_container_width=True, height=430)
     st.subheader("What drives each team's rating (top 20)")
     top = power.head(20)
@@ -240,8 +245,45 @@ with tabs[7]:
     else:
         st.info("No recent goal records found for this team.")
 
-# ---------------------------------------------------------------- Managers
+# ---------------------------------------------------------------- Squad
 with tabs[8]:
+    st.subheader("Squads (official 26-man lists)")
+    if squads_info:
+        st.caption(f"Squad skill is built from the official {squads_info.get('source','')} 26-man "
+                   f"squads (updated {squads_info.get('fetched_at','?')}), each player matched to his "
+                   "EA rating — so only players actually selected count toward a team's strength.")
+    else:
+        st.info("Official squads not loaded — using each nation's top-rated EA players as a "
+                "fallback. Click **🔄 Refresh data** to fetch the official squads.")
+    st.caption("Squad skill (a learned model factor) is a rank-weighted mean of these players' EA "
+               "overall ratings — covering defence, midfield and goalkeeping that goal data can't see.")
+
+    head = st.columns([2, 1])
+    team = head[0].selectbox("Team", list(power.index), key="squadteam")
+    dn = teams.loc[team, "data_name"]
+    head[1].metric("Squad-skill rank", f"#{int(power['skill'].rank(ascending=False)[team])} / 48")
+    sq = squads.get(dn)
+
+    if sq is None or not len(sq):
+        st.info("No squad data for this team.")
+    else:
+        official = bool(sq["callup"].iloc[0])
+        n_fringe = int((sq["overall"] == DEFAULT_OVERALL).sum())
+        mc = st.columns(3)
+        mc[0].metric("Squad skill", f"{squad_rating(sq['overall'].to_numpy()):.1f}")
+        mc[1].metric("Players", f"{len(sq)}")
+        mc[2].metric("Source", "official" if official else "EA top-rated")
+        view = sq.rename(columns={"player": "Player", "pos": "Pos"})
+        view["EA overall"] = view["overall"].map(
+            lambda v: "— (fringe)" if v == DEFAULT_OVERALL else f"{v:.0f}")
+        st.dataframe(view[["Player", "EA overall", "Pos"]],
+                     use_container_width=True, hide_index=True, height=380)
+        if n_fringe:
+            st.caption(f"{n_fringe} selected player(s) aren't in the EA database — counted at a "
+                       "fringe baseline so they don't inflate the rating.")
+
+# ---------------------------------------------------------------- Managers
+with tabs[9]:
     st.subheader("Manager / coaching factor (data-derived)")
     st.caption("No subjective rating: the coaching factor is each team's results over/under-performance "
                "versus Elo expectation, measured under the current manager's tenure.")
@@ -256,7 +298,7 @@ with tabs[8]:
                  "Career PPG": "{:.2f}"}, na_rep="—"), use_container_width=True, height=520)
 
 # ---------------------------------------------------------------- Data
-with tabs[9]:
+with tabs[10]:
     st.subheader("All probabilities")
     st.dataframe(probs.style.format("{:.1%}"), use_container_width=True, height=520)
     c1, c2 = st.columns(2)

@@ -25,13 +25,15 @@ from ..features.elo import EloResult
 from ..features.form import asof_form, current_form
 from ..features.manager import build_coach_asof, current_coach
 from ..features.players import asof_player_features, current_player_factors
+from ..features.skills import asof_skill_features, current_skill_factors
 
-FACTORS = ["elo", "attack_talent", "wc_player", "form", "coach"]
+FACTORS = ["elo", "attack_talent", "wc_player", "form", "skill", "coach"]
 FACTOR_LABELS = {
     "elo": "Elo (match results)",
     "attack_talent": "Attacking talent (players)",
     "wc_player": "World Cup pedigree (players)",
     "form": "Recent form",
+    "skill": "Squad skill (EA player ratings)",
     "coach": "Manager / coaching effect",
 }
 
@@ -106,6 +108,8 @@ def _assemble_asof(pre: pd.DataFrame, goals: pd.DataFrame) -> pd.DataFrame:
     pl = asof_player_features(pre, goals)
     df["attack_talent_home"] = pl["att_home"]; df["attack_talent_away"] = pl["att_away"]
     df["wc_player_home"] = pl["wc_home"]; df["wc_player_away"] = pl["wc_away"]
+    sk = asof_skill_features(pre)   # EA squad ratings from the edition active at kickoff
+    df["skill_home"] = sk["skill_home"]; df["skill_away"] = sk["skill_away"]
     return df
 
 
@@ -121,9 +125,12 @@ def train(pre: pd.DataFrame, goals: pd.DataFrame, since="2011-01-01", seed=2026)
         pooled = np.concatenate([d[f"{f}_home"].to_numpy(), d[f"{f}_away"].to_numpy()])
         means[f] = float(np.nanmean(pooled)); sds[f] = float(np.nanstd(pooled)) or 1.0
 
-    # standardized home-minus-away gap per factor
+    # standardized home-minus-away gap per factor; NaN factor values (e.g. a team with no EA
+    # skill rating, or pre-2014 matches before the first edition) are imputed to the factor
+    # mean so their standardized gap is exactly 0 (no spurious signal, no NaN propagation).
     Z = np.column_stack([
-        ((d[f"{f}_home"] - means[f]) / sds[f]) - ((d[f"{f}_away"] - means[f]) / sds[f])
+        ((d[f"{f}_home"].fillna(means[f]) - means[f]) / sds[f])
+        - ((d[f"{f}_away"].fillna(means[f]) - means[f]) / sds[f])
         for f in FACTORS])
     home = (~d["neutral"]).astype(float).to_numpy()
     y_gd = d["gd"].to_numpy(float)
@@ -163,17 +170,23 @@ def train(pre: pd.DataFrame, goals: pd.DataFrame, since="2011-01-01", seed=2026)
 
 
 def current_factor_table(teams: pd.DataFrame, elo: EloResult, pre: pd.DataFrame,
-                         goals: pd.DataFrame, appointments_dn: dict, ref_date: str) -> pd.DataFrame:
-    """Raw current factor values per 2026 team (indexed by team display name)."""
+                         goals: pd.DataFrame, appointments_dn: dict, ref_date: str,
+                         skill: pd.Series | None = None) -> pd.DataFrame:
+    """Raw current factor values per 2026 team (indexed by team display name).
+
+    `skill` may be supplied to override; otherwise it is the current squad-skill per team
+    (from the official 26-man squads matched to EA ratings)."""
     dn = teams["data_name"]
     pf = current_player_factors(goals, ref_date)
     fm = current_form(pre, ref_date)
     co = current_coach(pre, appointments_dn, ref_date)
+    sk = current_skill_factors(teams) if skill is None else skill.reindex(teams.index)
     out = pd.DataFrame(index=teams.index)
     out["elo"] = [elo.ratings.get(d, 1500.0) for d in dn]
     out["attack_talent"] = [float(pf["attack_talent"].get(d, 0.0)) for d in dn]
     out["wc_player"] = [float(pf["wc_player"].get(d, 0.0)) for d in dn]
     out["form"] = [float(fm.get(d, 0.5)) for d in dn]
+    out["skill"] = sk.astype(float)
     out["coach"] = [float(co.get(d, 0.0)) for d in dn]
     return out
 
@@ -183,7 +196,9 @@ def build_power_table(teams: pd.DataFrame, factors: pd.DataFrame, model: Trained
     df = teams.copy()
     for f in FACTORS:
         df[f] = factors[f]
-        df[f"z_{f}"] = (factors[f] - model.means[f]) / model.sds[f]
+        # impute any missing factor value to its training mean -> standardized 0 (neutral),
+        # so e.g. an absent skill rating never NaN-propagates through the whole power table.
+        df[f"z_{f}"] = (factors[f].fillna(model.means[f]) - model.means[f]) / model.sds[f]
     # contribution of each factor to the team's rating, centred on the 48-team field mean
     field_meanz = {f: df[f"z_{f}"].mean() for f in FACTORS}
     for f in FACTORS:
