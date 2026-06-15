@@ -119,19 +119,27 @@ def train(pre: pd.DataFrame, goals: pd.DataFrame, since="2011-01-01", seed=2026)
     mask = (asof["date"] >= pd.Timestamp(since)) & (asof["elo_home"] != 1500.0) & (asof["elo_away"] != 1500.0)
     d = asof[mask].copy()
 
-    # pooled team-level standardization (home and away observations together)
+    # pooled team-level standardization (home and away observations together). A factor with NO
+    # usable data (e.g. squad skill when the historical EA file couldn't be downloaded — no Kaggle
+    # creds on a cloud cold start) yields an all-NaN column; guard mean/SD to finite values so it
+    # degrades to a neutral (zero-contribution) factor instead of poisoning the regression.
     means, sds = {}, {}
     for f in FACTORS:
-        pooled = np.concatenate([d[f"{f}_home"].to_numpy(), d[f"{f}_away"].to_numpy()])
-        means[f] = float(np.nanmean(pooled)); sds[f] = float(np.nanstd(pooled)) or 1.0
+        pooled = np.concatenate([d[f"{f}_home"].to_numpy(float), d[f"{f}_away"].to_numpy(float)])
+        has = np.any(np.isfinite(pooled))
+        mu = float(np.nanmean(pooled)) if has else 0.0
+        sd = float(np.nanstd(pooled)) if has else 0.0
+        means[f] = mu if np.isfinite(mu) else 0.0
+        sds[f] = sd if (np.isfinite(sd) and sd > 0) else 1.0
 
-    # standardized home-minus-away gap per factor; NaN factor values (e.g. a team with no EA
-    # skill rating, or pre-2014 matches before the first edition) are imputed to the factor
-    # mean so their standardized gap is exactly 0 (no spurious signal, no NaN propagation).
+    # standardized home-minus-away gap per factor; NaN factor values (a team with no EA skill
+    # rating, or pre-2014 matches before the first edition) are imputed to the factor mean so
+    # their standardized gap is 0. nan_to_num is a final guard so no NaN/inf can reach lstsq.
     Z = np.column_stack([
         ((d[f"{f}_home"].fillna(means[f]) - means[f]) / sds[f])
         - ((d[f"{f}_away"].fillna(means[f]) - means[f]) / sds[f])
         for f in FACTORS])
+    Z = np.nan_to_num(Z, nan=0.0, posinf=0.0, neginf=0.0)
     home = (~d["neutral"]).astype(float).to_numpy()
     y_gd = d["gd"].to_numpy(float)
     y_cls = np.where(d["gd"] > 0, 2, np.where(d["gd"] == 0, 1, 0))   # 0=away,1=draw,2=home
