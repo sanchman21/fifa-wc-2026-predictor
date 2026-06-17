@@ -1,5 +1,7 @@
 # FIFA World Cup 2026 — Explainable Statistical Forecast
 
+App Link: https://fifa-wc-2026-predictor-4v9gwzmsucn2vr4jzdpeo7.streamlit.app/
+
 A reproducible, **explainable** model that forecasts how all **48 teams** progress through
 the FIFA World Cup 2026 — from the group stage to the Round of 32, Round of 16,
 Quarter-finals, Semi-finals, Final, and the eventual champion.
