@@ -72,8 +72,14 @@ def prepare_model(refresh=False, verbose=True):
 
     # Track record: lock pre-match predictions, grade the ones that have since played, and
     # learn a calibration scale from how we've done so far (heavily shrunk toward no-change).
-    ledger = tracking.update_ledger(power, model, fixtures,
-                                    run_date=_dt.date.today().isoformat())
+    # Tracking is a non-essential overlay — never let it take down the whole forecast (e.g. a
+    # read-only filesystem or a corrupt ledger), so degrade to empty/default metrics on failure.
+    try:
+        ledger = tracking.update_ledger(power, model, fixtures,
+                                        run_date=_dt.date.today().isoformat())
+    except Exception as exc:  # noqa: BLE001 - tracking must never break the forecast
+        log(f"[track] skipped (could not update ledger: {exc})")
+        ledger = {}
     record = tracking.track_record(ledger)
     calib = tracking.calibration_scale(ledger, model)
     sup_scale = calib["scale"] if calib["applied"] else 1.0
