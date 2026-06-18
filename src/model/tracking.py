@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -30,7 +31,15 @@ import pandas as pd
 from .match_model import scoreline_matrix
 from .predict import MIN_LAMBDA, _supremacy
 
-LEDGER_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "output", "prediction_log.json")
+# Where the locked-prediction ledger lives. Defaults to the in-repo ``output/`` dir, but can be
+# pointed elsewhere via ``WC_LEDGER_PATH`` (useful on hosts that mount the repo read-only).
+LEDGER_PATH = os.environ.get(
+    "WC_LEDGER_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "output", "prediction_log.json"),
+)
+# Fallback used only when the primary path is not writable (e.g. Streamlit Community Cloud serves
+# the cloned repo from a read-only mount, so writing into ``output/`` raises OSError).
+_FALLBACK_PATH = os.path.join(tempfile.gettempdir(), "wc2026_prediction_log.json")
 
 _OUTCOMES = ("home", "draw", "away")
 _UNIFORM_LOGLOSS = math.log(3)            # skill baseline: a coin-flip over 3 outcomes
@@ -97,16 +106,32 @@ def grade_entry(e: dict) -> dict | None:
 
 # --------------------------------------------------------------------------- ledger I/O
 def load_ledger(path: str = LEDGER_PATH) -> dict:
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    """Read the ledger, preferring ``path`` but falling back to the temp-dir copy a previous
+    run may have written when ``path`` was read-only."""
+    for p in (path, _FALLBACK_PATH):
+        if p and os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as fh:
+                    return json.load(fh)
+            except (OSError, ValueError):
+                continue
+    return {}
 
 
 def save_ledger(ledger: dict, path: str = LEDGER_PATH) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(ledger, fh, indent=2, sort_keys=True)
+    """Persist the ledger. If ``path`` is not writable (read-only repo mount on some hosts),
+    transparently fall back to a temp-dir copy; if even that fails, give up quietly — the
+    in-memory ledger still drives this run's metrics, only cross-run persistence is lost."""
+    for p in (path, _FALLBACK_PATH):
+        if not p:
+            continue
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(ledger, fh, indent=2, sort_keys=True)
+            return
+        except OSError:
+            continue
 
 
 def update_ledger(power: pd.DataFrame, model, fixtures: pd.DataFrame,

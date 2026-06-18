@@ -47,7 +47,10 @@ teams, model, power, goals, managers, results, fixtures = (
     prep["teams"], prep["model"], prep["power"], prep["goals"],
     prep["managers"], prep["results"], prep["fixtures"])
 squads, squads_info = prep["squads"], prep["squads_meta"]
-track = prep["track_record"]; calib = prep["calibration"]
+# Tracking is an optional overlay; tolerate its absence so the forecast still renders.
+from src.model import tracking as _tracking  # noqa: E402
+track = prep.get("track_record") or _tracking.track_record({})
+calib = prep.get("calibration") or _tracking.calibration_scale({}, model)
 
 st.title("🏆 FIFA World Cup 2026 — Explainable Forecast")
 st.caption(f"48 teams · weights LEARNED from {model.n_train:,} matches · "
