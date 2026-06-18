@@ -28,6 +28,68 @@ def save_csvs(power: pd.DataFrame, probs: pd.DataFrame):
     probs.round(4).to_csv(os.path.join(OUT_DIR, "predictions.csv"))
 
 
+def write_track_record(record: dict, calib: dict) -> str | None:
+    """Append/refresh the model's self-grading section as output/track_record.md."""
+    _ensure_out()
+    path = os.path.join(OUT_DIR, "track_record.md")
+    if not record.get("n_graded"):
+        md = ("# Model Track Record\n\n"
+              f"No WC-2026 matches graded yet — {record.get('n_pending', 0)} pre-match "
+              "prediction(s) locked in and waiting for results.\n")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(md)
+        return path
+
+    df = record["frame"]
+    df.round(4).to_csv(os.path.join(OUT_DIR, "track_record.csv"), index=False)
+    cal = record["calibration"]
+    cal_rows = "\n".join(
+        f"| {r.bucket} | {int(r.n)} | {r.avg_confidence:.0%} | {r.hit_rate:.0%} |"
+        for r in cal.itertuples()) or "| — | 0 | — | — |"
+    recent = df.tail(10)
+    recent_rows = "\n".join(
+        f"| {r.date} | {r.match} | {r.predicted} ({r.pick:.0%}) | {r.score} ({r.actual}) "
+        f"| {'✅' if r.correct else '❌'} |"
+        for r in recent.itertuples())
+    calib_line = (f"Learned calibration scale **{calib['scale']:.3f}** "
+                  + ("(applied — " if calib["applied"] else "(not yet applied; needs ≥12 "
+                     "graded matches before nudging — ")
+                  + (f"log-loss {calib['baseline_logloss']:.3f} → {calib['calibrated_logloss']:.3f})"
+                     if calib["baseline_logloss"] is not None else "no data)"))
+
+    md = f"""# Model Track Record
+
+*How the locked, pre-match predictions have actually fared as results came in.*
+
+- **Graded matches:** {record['n_graded']}  ·  **locked & pending:** {record['n_pending']}
+- **Outcome hit-rate:** {record['accuracy']:.1%}
+- **Brier score:** {record['brier']:.3f}  (lower is better; 0 = perfect)
+- **Log-loss:** {record['logloss']:.3f}  vs {0.0:.0f}… coin-flip {1.0986:.3f}
+  → **{record['skill_pct']:+.0f}% skill** over a 3-way coin-flip
+- **Mean expected-goal error:** {record['mean_goal_err']:.2f} goals/match
+- {calib_line}
+
+## Calibration (reliability)
+
+When the model is *this* confident in its pick, how often is it right?
+
+| Confidence bucket | Matches | Avg confidence | Actual hit-rate |
+|---|---|---|---|
+{cal_rows}
+
+## Most recent graded predictions
+
+| Date | Match | Model pick | Result | Hit |
+|---|---|---|---|---|
+{recent_rows}
+
+*Full per-match log: `output/track_record.csv` (raw ledger: `output/prediction_log.json`).*
+"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(md)
+    return path
+
+
 def chart_champion_odds(probs, top=15):
     d = probs.sort_values("P_champion", ascending=False).head(top)[::-1]
     plt.figure(figsize=(9, 7))

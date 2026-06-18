@@ -31,10 +31,10 @@ def _prep():
 
 
 @st.cache_data(show_spinner="Simulating tournaments…")
-def _sim(sims: int, seed: int, known_items=None):
+def _sim(sims: int, seed: int, known_items=None, sup_scale: float = 1.0):
     prep = _prep()
     kg = dict(known_items) if known_items else None
-    probs, chalk = run_simulation(prep, sims=sims, seed=seed, known_group=kg)
+    probs, chalk = run_simulation(prep, sims=sims, seed=seed, known_group=kg, sup_scale=sup_scale)
     return probs, chalk
 
 
@@ -47,6 +47,7 @@ teams, model, power, goals, managers, results, fixtures = (
     prep["teams"], prep["model"], prep["power"], prep["goals"],
     prep["managers"], prep["results"], prep["fixtures"])
 squads, squads_info = prep["squads"], prep["squads_meta"]
+track = prep["track_record"]; calib = prep["calibration"]
 
 st.title("🏆 FIFA World Cup 2026 — Explainable Forecast")
 st.caption(f"48 teams · weights LEARNED from {model.n_train:,} matches · "
@@ -67,15 +68,30 @@ with st.sidebar:
     st.caption(f"{n_played} of {len(fixtures)} WC-2026 matches played so far "
                "(forecast auto-conditions on real results).")
     st.divider()
+    st.subheader("Self-calibration")
+    can_calibrate = calib["scale"] is not None and calib["n"] > 0
+    use_calib = st.toggle(
+        f"Apply learned scale ({calib['scale']:.3f})" if can_calibrate else "Apply learned scale",
+        value=bool(calib["applied"]), disabled=not can_calibrate,
+        help="Stretches/compresses rating gaps based on how the model's own locked predictions "
+             "have scored so far. Needs ≥12 graded matches before it nudges anything.")
+    if can_calibrate:
+        st.caption(f"Fitted on {calib['n']} graded match(es). "
+                   + ("Self-correcting over/under-confidence." if calib["applied"]
+                      else "Too few results to apply automatically — toggle to preview."))
+    else:
+        st.caption("No graded matches yet — calibration unlocks once results come in.")
+    sup_scale = float(calib["scale"]) if (use_calib and can_calibrate) else 1.0
+    st.divider()
     st.subheader("Learned weights")
     for f in sorted(FACTORS, key=lambda f: -model.weights[f]):
         st.progress(model.weights[f], text=f"{FACTOR_LABELS[f]} — {pct(model.weights[f])}")
 
-probs, chalk = _sim(int(sims), int(seed))
+probs, chalk = _sim(int(sims), int(seed), sup_scale=sup_scale)
 
-tabs = st.tabs(["🏆 Overview", "🔮 Match Predictor", "📡 Live / What-if", "📊 Model & Weights",
-                "💪 Power Ratings", "🅰️ Groups", "🗺️ Knockouts", "⚽ Players",
-                "🩹 Squad", "🧑‍💼 Managers", "📥 Data"])
+tabs = st.tabs(["🏆 Overview", "🔮 Match Predictor", "📈 Track Record", "📡 Live / What-if",
+                "📊 Model & Weights", "💪 Power Ratings", "🅰️ Groups", "🗺️ Knockouts",
+                "⚽ Players", "🩹 Squad", "🧑‍💼 Managers", "📥 Data"])
 
 # ---------------------------------------------------------------- Overview
 with tabs[0]:
@@ -102,7 +118,7 @@ with tabs[1]:
     if home == away:
         st.info("Pick two different teams.")
     else:
-        pr = predict_match(power, model, home, away)
+        pr = predict_match(power, model, home, away, sup_scale=sup_scale)
         m = st.columns(3)
         m[0].metric(f"{home} win", pct(pr["p_home"]))
         m[1].metric("Draw", pct(pr["p_draw"]))
@@ -118,14 +134,73 @@ with tabs[1]:
     st.subheader("Predicted scheduled fixtures")
     only_unplayed = st.checkbox("Only unplayed", value=True)
     gsel = st.selectbox("Group filter", ["All"] + sorted(power["group"].unique()))
-    pf = predict_fixtures(power, model, fixtures, only_unplayed=only_unplayed)
+    pf = predict_fixtures(power, model, fixtures, only_unplayed=only_unplayed, sup_scale=sup_scale)
     if gsel != "All":
         pf = pf[pf["group"] == gsel]
     st.dataframe(pf.style.format({"P(home win)": "{:.0%}", "P(draw)": "{:.0%}", "P(away win)": "{:.0%}"}),
                  use_container_width=True, hide_index=True, height=380)
 
-# ---------------------------------------------------------------- Live / What-if
+# ---------------------------------------------------------------- Track Record
 with tabs[2]:
+    st.subheader("How the model's own predictions have scored")
+    st.caption("Every WC-2026 prediction is *locked* while the match is unplayed, then graded "
+               "when the real score arrives — so this is a genuine out-of-sample record, not "
+               "hindsight. The learned calibration scale (sidebar) is fit from exactly these results.")
+    if not track["n_graded"]:
+        st.info(f"No matches graded yet — **{track['n_pending']}** pre-match prediction(s) are "
+                "locked in and waiting for results. Click **🔄 Refresh data** once matches are "
+                "played to pull the scores and start grading.")
+    else:
+        k = st.columns(4)
+        k[0].metric("Matches graded", track["n_graded"], f"{track['n_pending']} pending")
+        k[1].metric("Outcome hit-rate", pct(track["accuracy"]))
+        k[2].metric("Log-loss", f"{track['logloss']:.3f}", f"{track['skill_pct']:+.0f}% skill vs coin-flip",
+                    delta_color="normal")
+        k[3].metric("Brier score", f"{track['brier']:.3f}", help="0 = perfect, lower is better")
+        st.caption(f"Mean expected-goal error: {track['mean_goal_err']:.2f} goals/match. "
+                   f"A 3-way coin-flip scores log-loss {1.0986:.3f}.")
+
+        st.markdown("##### Calibration — when the model is *this* confident, how often is it right?")
+        cal = track["calibration"]
+        if len(cal):
+            cal_v = cal.assign(avg_confidence=cal["avg_confidence"] * 100,
+                               hit_rate=cal["hit_rate"] * 100).melt(
+                id_vars=["bucket", "n"], value_vars=["avg_confidence", "hit_rate"],
+                var_name="metric", value_name="pct")
+            cal_v["metric"] = cal_v["metric"].map({"avg_confidence": "Model confidence",
+                                                   "hit_rate": "Actual hit-rate"})
+            st.altair_chart(alt.Chart(cal_v).mark_bar().encode(
+                x=alt.X("bucket:N", title="Confidence bucket", sort=list(cal["bucket"])),
+                xOffset="metric:N",
+                y=alt.Y("pct:Q", title="%"), color=alt.Color("metric:N", title=None),
+                tooltip=["bucket", "metric", alt.Tooltip("pct:Q", format=".0f"), "n"]).properties(height=280),
+                use_container_width=True)
+            st.caption("Bars at equal height ⇒ well-calibrated. Confidence consistently above the "
+                       "hit-rate ⇒ over-confident (scale < 1 corrects it); below ⇒ under-confident.")
+
+        if calib["baseline_logloss"] is not None:
+            cc = st.columns(3)
+            cc[0].metric("Fitted scale", f"{calib['scale']:.3f}",
+                         "applied" if calib["applied"] else "preview only")
+            cc[1].metric("Log-loss @ scale 1.0", f"{calib['baseline_logloss']:.3f}")
+            cc[2].metric("Log-loss @ fitted scale", f"{calib['calibrated_logloss']:.3f}",
+                         f"{calib['calibrated_logloss'] - calib['baseline_logloss']:+.3f}",
+                         delta_color="inverse")
+
+        st.markdown("##### Graded predictions")
+        df = track["frame"].copy()
+        df["hit"] = df["correct"].map({1: "✅", 0: "❌"})
+        show = df[["date", "match", "stage", "predicted", "pick", "score", "actual", "hit",
+                   "p_actual", "brier", "logloss"]].rename(
+            columns={"pick": "confidence", "p_actual": "P(actual)"})
+        st.dataframe(show.style.format({"confidence": "{:.0%}", "P(actual)": "{:.0%}",
+                     "brier": "{:.3f}", "logloss": "{:.3f}"}),
+                     use_container_width=True, hide_index=True, height=360)
+        st.download_button("⬇ track_record.csv", df.to_csv(index=False).encode(),
+                           "track_record.csv", "text/csv")
+
+# ---------------------------------------------------------------- Live / What-if
+with tabs[3]:
     st.subheader("Update the forecast with results")
     st.markdown(
         "- **Real results:** click **🔄 Refresh data** in the sidebar to pull the latest scores "
@@ -145,7 +220,7 @@ with tabs[2]:
     active = st.session_state.get("whatif_active")
     if active:
         kg_dict_items = tuple(((h, a), (hs, as_)) for (h, a, hs, as_) in active)
-        wp, _ = _sim(int(sims), int(seed), kg_dict_items)
+        wp, _ = _sim(int(sims), int(seed), kg_dict_items, sup_scale=sup_scale)
         st.caption(f"Conditioned on {len(active)} entered result(s).")
         comp = pd.DataFrame({"baseline": probs["P_champion"], "conditioned": wp["P_champion"]})
         comp["Δ"] = comp["conditioned"] - comp["baseline"]
@@ -155,7 +230,7 @@ with tabs[2]:
         st.caption("Enter at least one score and click **Apply & recompute**.")
 
 # ---------------------------------------------------------------- Model & Weights
-with tabs[3]:
+with tabs[4]:
     st.subheader("The weights are trained, not chosen")
     st.markdown(
         f"Each factor is computed **as of every match's date** over **{model.n_train:,} "
@@ -185,7 +260,7 @@ with tabs[3]:
     k[3].metric("Home/host edge", f"{model.beta_home:+.2f} goals")
 
 # ---------------------------------------------------------------- Power Ratings
-with tabs[4]:
+with tabs[5]:
     st.subheader("Composite power rating & factor attribution")
     show = power[["rank", "group", "power_index"] + FACTORS].copy()
     st.dataframe(show.style.format({"power_index": "{:.1f}", "elo": "{:.0f}", "attack_talent": "{:.1f}",
@@ -202,7 +277,7 @@ with tabs[4]:
         use_container_width=True)
 
 # ---------------------------------------------------------------- Groups
-with tabs[5]:
+with tabs[6]:
     st.subheader("Group-stage qualification probabilities")
     g = st.selectbox("Group", sorted(power["group"].unique()), key="grp")
     sub = probs.join(power["group"]).query("group == @g").copy()
@@ -214,7 +289,7 @@ with tabs[5]:
     st.caption("Top 2 of each group + the 8 best third-placed teams reach the Round of 32.")
 
 # ---------------------------------------------------------------- Knockouts
-with tabs[6]:
+with tabs[7]:
     st.subheader("Stage-by-stage advancement probability")
     heat = probs.sort_values("P_champion", ascending=False).head(24)[STAGES].copy()
     heat.columns = STAGE_LABELS
@@ -227,7 +302,7 @@ with tabs[6]:
     st.success(f"🏆 Predicted champion: **{chalk['champion']}**")
 
 # ---------------------------------------------------------------- Players
-with tabs[7]:
+with tabs[8]:
     st.subheader("Player attacking data (real goal-by-goal records)")
     st.caption("Attack-talent weights each goal by the scorer's proven track record, recency-decayed. "
                "Player *value* is never used — a cheap prolific scorer rates highly.")
@@ -246,7 +321,7 @@ with tabs[7]:
         st.info("No recent goal records found for this team.")
 
 # ---------------------------------------------------------------- Squad
-with tabs[8]:
+with tabs[9]:
     st.subheader("Squads (official 26-man lists)")
     if squads_info:
         st.caption(f"Squad skill is built from the official {squads_info.get('source','')} 26-man "
@@ -283,7 +358,7 @@ with tabs[8]:
                        "fringe baseline so they don't inflate the rating.")
 
 # ---------------------------------------------------------------- Managers
-with tabs[9]:
+with tabs[10]:
     st.subheader("Manager / coaching factor (data-derived)")
     st.caption("No subjective rating: the coaching factor is each team's results over/under-performance "
                "versus Elo expectation, measured under the current manager's tenure.")
@@ -298,7 +373,7 @@ with tabs[9]:
                  "Career PPG": "{:.2f}"}, na_rep="—"), use_container_width=True, height=520)
 
 # ---------------------------------------------------------------- Data
-with tabs[10]:
+with tabs[11]:
     st.subheader("All probabilities")
     st.dataframe(probs.style.format("{:.1%}"), use_container_width=True, height=520)
     c1, c2 = st.columns(2)

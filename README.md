@@ -25,8 +25,12 @@ What makes it different:
 - **Manager quality is measured, not guessed.** No subjective score: the coaching factor is each
   team's results over/under-performance versus Elo expectation *under the current manager's
   tenure* (real appointment dates).
-- An **interactive Streamlit UI** to explore weights, ratings, groups, knockouts, players and
-  managers.
+- **It grades itself and learns from the score.** Every WC-2026 prediction is *locked while the
+  match is unplayed*, then graded when the real result lands (hit-rate, Brier, log-loss,
+  calibration). That honest track record drives a **self-calibration** step that gently corrects
+  the model if it's running over- or under-confident.
+- An **interactive Streamlit UI** to explore weights, ratings, groups, knockouts, players,
+  managers and the live track record.
 
 > **Format note.** WC 2026 has **48 teams in 12 groups of 4**. Top 2 of each group (24) + the
 > **8 best third-placed teams** (32 total) reach the Round of 32, then R16 → QF → SF → Final.
@@ -130,13 +134,34 @@ winner/runner-up probabilities sum to 1; advancement is monotone per team.
   - **Official squads** (UI **Squad** tab) — the squad-skill factor is built from each nation's
     official 26-man squad (matched to EA ratings), refreshed alongside scores. Read-only.
 
+### Self-tracking & calibration (`src/model/tracking.py`, UI **Track Record** tab)
+The model keeps an honest scorecard of its own forecasts:
+- **Lock, then grade.** While a fixture is unplayed, the current pre-match prediction
+  (win/draw/loss probabilities, expected goals, supremacy) is snapshotted and **locked** into a
+  persistent ledger (`output/prediction_log.json`); it is never overwritten. When the real score
+  arrives (via **🔄 Refresh**), the locked entry is graded — outcome hit-rate, **Brier score**,
+  **log-loss** (vs a 3-way coin-flip), and expected-goal error. Predictions for matches already
+  played before tracking began are flagged and excluded, so the record stays genuinely
+  out-of-sample.
+- **Calibration (reliability).** Matches are bucketed by the model's confidence in its pick to
+  check whether, e.g., its 70%-confident picks actually win ~70% of the time.
+- **Self-correction.** A single **supremacy scale** is fit to minimise log-loss over the graded
+  matches — heavily shrunk toward 1.0 (≈12 pseudo-matches voting for "no change"), so a handful of
+  results can't whipsaw it. Once ≥12 matches are graded it's applied automatically (scale < 1
+  tempers favourites if the model was over-confident, > 1 sharpens them); the sidebar toggle lets
+  you preview or disable it. The scale feeds both the Match Predictor and the full tournament
+  simulation (stretching rating *gaps*, leaving the host edge intact).
+- Outputs: `output/track_record.md` + `output/track_record.csv`; the ledger
+  `output/prediction_log.json` is committed so the record persists across runs and deploys.
+
 ## Interactive UI (`streamlit run app.py`)
-Eleven tabs: **Overview** · **Match Predictor** · **Live / What-if** · **Model & Weights**
-(learned weights + validation vs Elo-only) · **Power Ratings** (per-team factor attribution) ·
-**Groups** · **Knockouts** (stage heatmap, predicted bracket) · **Players** (top scorers,
-attack-talent ranks) · **Squad** (official 26-man squads + EA ratings) · **Managers** (tenure +
-coaching effect) · **Data** (downloads). Training is cached; re-simulate, predict matches, refresh
-to live scores, or run what-ifs from the UI.
+Twelve tabs: **Overview** · **Match Predictor** · **Track Record** (self-grading hit-rate,
+calibration, learned scale) · **Live / What-if** · **Model & Weights** (learned weights +
+validation vs Elo-only) · **Power Ratings** (per-team factor attribution) · **Groups** ·
+**Knockouts** (stage heatmap, predicted bracket) · **Players** (top scorers, attack-talent ranks) ·
+**Squad** (official 26-man squads + EA ratings) · **Managers** (tenure + coaching effect) ·
+**Data** (downloads). A sidebar **self-calibration** toggle applies the track-record scale.
+Training is cached; re-simulate, predict matches, refresh to live scores, or run what-ifs from the UI.
 
 ---
 
@@ -162,11 +187,12 @@ src/
   data/      fetch_data.py · fetch_skills.py · fetch_squads.py · secrets.py · config_loader.py
   features/  elo.py · players.py · form.py · skills.py · availability.py · manager.py
   model/     train.py (LEARNS the weights) · match_model.py · tournament.py (Monte-Carlo)
+             predict.py (per-match) · tracking.py (locks/grades predictions, fits calibration)
   explain/   report.py
   main.py    pipeline: prepare_model() + run_simulation()
 app.py    Streamlit UI
 .env      Kaggle credentials (git-ignored; see .env.example)
-output/   generated report.md, CSVs, charts
+output/   generated report.md, CSVs, charts; prediction_log.json (committed track-record ledger)
 ```
 
 ---

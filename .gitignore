@@ -1,5 +1,6 @@
 # Data IS committed for reliable cloud cold-starts (see DEPLOY.md).
-# Generated outputs are not.
+# Generated outputs are not — EXCEPT output/prediction_log.json, the prediction-tracking ledger,
+# which is durable accumulated state (locked pre-match forecasts) and must persist across runs.
 output/*.csv
 output/*.png
 output/*.md

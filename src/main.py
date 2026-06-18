@@ -9,6 +9,7 @@ Or explore interactively:  streamlit run app.py
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import os
 import sys
 import time
@@ -21,6 +22,7 @@ from .features.elo import compute_elo
 from .features.fixtures import known_group_results, known_knockout_results, wc2026_matches
 from .features.players import load_goals
 from .features.skills import current_squads, squads_meta
+from .model import tracking
 from .model.tournament import TournamentSimulator
 from .model.train import build_power_table, current_factor_table, train
 
@@ -67,19 +69,40 @@ def prepare_model(refresh=False, verbose=True):
     known_ko = known_knockout_results(fixtures, teams, load_shootouts())
     if known or known_ko:
         log(f"[live] conditioning on {len(known)} group + {len(known_ko)} knockout result(s)")
+
+    # Track record: lock pre-match predictions, grade the ones that have since played, and
+    # learn a calibration scale from how we've done so far (heavily shrunk toward no-change).
+    ledger = tracking.update_ledger(power, model, fixtures,
+                                    run_date=_dt.date.today().isoformat())
+    record = tracking.track_record(ledger)
+    calib = tracking.calibration_scale(ledger, model)
+    sup_scale = calib["scale"] if calib["applied"] else 1.0
+    if record["n_graded"]:
+        log(f"[track] graded {record['n_graded']} played match(es): "
+            f"{record['accuracy']:.0%} hit-rate, log-loss {record['logloss']:.3f} "
+            f"({record['skill_pct']:+.0f}% skill vs coin-flip); {record['n_pending']} locked & pending")
+        if calib["applied"]:
+            log(f"[track] applying learned calibration scale {sup_scale:.3f} "
+                f"(log-loss {calib['baseline_logloss']:.3f} → {calib['calibrated_logloss']:.3f})")
+
     return dict(teams=teams, managers=managers, results=results, goals=goals, elo=elo,
                 model=model, power=power, bracket=bracket, fixtures=fixtures, appts=appts,
-                squads=squads, squads_meta=squads_meta(), known_group=known, known_knockout=known_ko)
+                squads=squads, squads_meta=squads_meta(), known_group=known, known_knockout=known_ko,
+                ledger=ledger, track_record=record, calibration=calib, sup_scale=sup_scale)
 
 
-def run_simulation(prep, sims=20000, seed=2026, known_group=None, forced_knockout=None):
+def run_simulation(prep, sims=20000, seed=2026, known_group=None, forced_knockout=None,
+                   sup_scale=None):
     """Simulate; by default conditions on real played matches (prep['known_*']).
-    Pass known_group / forced_knockout explicitly (e.g. what-if scores) to override."""
+    Pass known_group / forced_knockout explicitly (e.g. what-if scores) to override.
+    sup_scale defaults to the track-record calibration (prep['sup_scale']); pass 1.0 to
+    disable it or any value to override."""
     kg = prep.get("known_group", {}) if known_group is None else known_group
     ko = prep.get("known_knockout", {}) if forced_knockout is None else forced_knockout
+    s = prep.get("sup_scale", 1.0) if sup_scale is None else sup_scale
     sim = TournamentSimulator(prep["power"], prep["teams"], prep["bracket"], elo_per_goal=1.0,
                               total_goals=prep["model"].total_goals, host_adv=prep["model"].beta_home,
-                              rho=prep["model"].rho, pen_k=0.4)
+                              rho=prep["model"].rho, pen_k=0.4, sup_scale=s)
     return sim.run(n_sims=sims, seed=seed, known_group=kg, forced_knockout=ko), sim.chalk_bracket()
 
 
@@ -106,6 +129,7 @@ def main(argv=None):
     report.save_csvs(R["power"], R["probs"])
     report.make_charts(R["power"], R["probs"], R["model"])
     report.write_report(R["power"], R["probs"], R["model"], R["chalk"], R["elo"], R["sims"])
+    report.write_track_record(R["track_record"], R["calibration"])
 
     print("-" * 64)
     print("DONE in %.1fs. See output/report.md  (or: streamlit run app.py)" % (time.time() - t0))
@@ -118,6 +142,14 @@ def main(argv=None):
         print(f"  {t:<24} {p*100:5.1f}%")
     print(f"\nChalk final: {R['chalk']['rounds']['final'][0][0]} vs "
           f"{R['chalk']['rounds']['final'][0][1]}  ->  {R['chalk']['champion']}")
+
+    tr = R["track_record"]
+    if tr["n_graded"]:
+        print(f"\nTrack record ({tr['n_graded']} graded, {tr['n_pending']} pending): "
+              f"{tr['accuracy']:.0%} hit-rate, log-loss {tr['logloss']:.3f} "
+              f"({tr['skill_pct']:+.0f}% skill). See output/track_record.md")
+    else:
+        print(f"\nTrack record: {tr['n_pending']} pre-match prediction(s) locked, awaiting results.")
     return 0
 
 

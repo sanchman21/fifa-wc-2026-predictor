@@ -76,9 +76,11 @@ def _build_allocation_table(group_letters):
 class TournamentSimulator:
     def __init__(self, power_df: pd.DataFrame, teams: pd.DataFrame, bracket: dict,
                  elo_per_goal: float, total_goals: float, host_adv: float,
-                 rho: float = -0.12, pen_k: float = 0.4):
+                 rho: float = -0.12, pen_k: float = 0.4, sup_scale: float = 1.0):
         # Ratings are in goal-supremacy units (from the trained model), so elo_per_goal=1.0
         # and host_adv is the learned home/host edge in goals. pen_k scales the penalty coin.
+        # sup_scale (from the model's own track record) stretches/compresses every rating GAP
+        # around the mean to self-correct over/under-confidence, leaving the host edge intact.
         self.bracket = bracket
         self.elo_per_goal = elo_per_goal
         self.total_goals = total_goals
@@ -87,7 +89,8 @@ class TournamentSimulator:
 
         self.team_names = list(power_df.index)
         self.idx = {t: i for i, t in enumerate(self.team_names)}
-        self.R = power_df["power_score"].to_numpy(float)
+        R = power_df["power_score"].to_numpy(float)
+        self.R = R.mean() + sup_scale * (R - R.mean())   # scale gaps, not absolute level
         self.host = teams.reindex(self.team_names)["host"].fillna(False).to_numpy(bool)
 
         # group letter -> ordered team indices (by position A1..A4)

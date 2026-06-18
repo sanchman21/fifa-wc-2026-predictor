@@ -22,8 +22,12 @@ def _supremacy(power, model, home, away):
     return float((zh - za) @ b + model.beta_home * (host_h - host_a))
 
 
-def predict_match(power: pd.DataFrame, model, home: str, away: str, max_goals: int = 10) -> dict:
-    sup = _supremacy(power, model, home, away)
+def predict_match(power: pd.DataFrame, model, home: str, away: str, max_goals: int = 10,
+                  sup_scale: float = 1.0) -> dict:
+    """`sup_scale` rescales the goal-supremacy — 1.0 is the raw model; a value learned from
+    the model's own track record (see model.tracking.calibration_scale) self-corrects
+    over/under-confidence. <1 tempers favourites, >1 sharpens them."""
+    sup = _supremacy(power, model, home, away) * sup_scale
     T = model.total_goals
     la = max(MIN_LAMBDA, (T + sup) / 2.0)
     lb = max(MIN_LAMBDA, (T - sup) / 2.0)
@@ -38,7 +42,8 @@ def predict_match(power: pd.DataFrame, model, home: str, away: str, max_goals: i
 
 
 def predict_fixtures(power: pd.DataFrame, model, fixtures: pd.DataFrame,
-                     only_unplayed: bool = True, stage: str | None = None) -> pd.DataFrame:
+                     only_unplayed: bool = True, stage: str | None = None,
+                     sup_scale: float = 1.0) -> pd.DataFrame:
     """Predict every fixture (optionally a single stage / only the unplayed ones)."""
     f = fixtures
     if only_unplayed:
@@ -47,7 +52,7 @@ def predict_fixtures(power: pd.DataFrame, model, fixtures: pd.DataFrame,
         f = f[f["stage"] == stage]
     rows = []
     for r in f.itertuples():
-        pr = predict_match(power, model, r.home, r.away)
+        pr = predict_match(power, model, r.home, r.away, sup_scale=sup_scale)
         fav = max([(r.home, pr["p_home"]), ("Draw", pr["p_draw"]), (r.away, pr["p_away"])],
                   key=lambda x: x[1])
         rows.append({"date": r.date.date(), "group": r.group, "stage": r.stage,
