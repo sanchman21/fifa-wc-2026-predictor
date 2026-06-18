@@ -82,32 +82,39 @@ def prepare_model(refresh=False, verbose=True):
         ledger = {}
     record = tracking.track_record(ledger)
     calib = tracking.calibration_scale(ledger, model)
-    sup_scale = calib["scale"] if calib["applied"] else 1.0
+    sup_scale = calib["sup_scale"] if calib["applied"] else 1.0
+    goal_scale = calib["goal_scale"] if calib["applied"] else 1.0
     if record["n_graded"]:
         log(f"[track] graded {record['n_graded']} played match(es): "
             f"{record['accuracy']:.0%} hit-rate, log-loss {record['logloss']:.3f} "
             f"({record['skill_pct']:+.0f}% skill vs coin-flip); {record['n_pending']} locked & pending")
+        log(f"[track] goals {record['goals_actual']:.2f} actual vs {record['goals_pred']:.2f} "
+            f"predicted ({record['goals_bias']:+.2f}); draw rate {record['draw_rate_actual']:.0%} "
+            f"actual vs {record['draw_rate_pred']:.0%} predicted")
         if calib["applied"]:
-            log(f"[track] applying learned calibration scale {sup_scale:.3f} "
+            log(f"[track] applying calibration: supremacy ×{sup_scale:.3f}, goals ×{goal_scale:.3f} "
                 f"(log-loss {calib['baseline_logloss']:.3f} → {calib['calibrated_logloss']:.3f})")
 
     return dict(teams=teams, managers=managers, results=results, goals=goals, elo=elo,
                 model=model, power=power, bracket=bracket, fixtures=fixtures, appts=appts,
                 squads=squads, squads_meta=squads_meta(), known_group=known, known_knockout=known_ko,
-                ledger=ledger, track_record=record, calibration=calib, sup_scale=sup_scale)
+                ledger=ledger, track_record=record, calibration=calib,
+                sup_scale=sup_scale, goal_scale=goal_scale)
 
 
 def run_simulation(prep, sims=20000, seed=2026, known_group=None, forced_knockout=None,
-                   sup_scale=None):
+                   sup_scale=None, goal_scale=None):
     """Simulate; by default conditions on real played matches (prep['known_*']).
     Pass known_group / forced_knockout explicitly (e.g. what-if scores) to override.
-    sup_scale defaults to the track-record calibration (prep['sup_scale']); pass 1.0 to
-    disable it or any value to override."""
+    sup_scale / goal_scale default to the track-record calibration (prep['sup_scale'],
+    prep['goal_scale']); pass 1.0 to disable either or any value to override. goal_scale
+    rescales the expected goal total feeding every simulated match."""
     kg = prep.get("known_group", {}) if known_group is None else known_group
     ko = prep.get("known_knockout", {}) if forced_knockout is None else forced_knockout
     s = prep.get("sup_scale", 1.0) if sup_scale is None else sup_scale
+    g = prep.get("goal_scale", 1.0) if goal_scale is None else goal_scale
     sim = TournamentSimulator(prep["power"], prep["teams"], prep["bracket"], elo_per_goal=1.0,
-                              total_goals=prep["model"].total_goals, host_adv=prep["model"].beta_home,
+                              total_goals=prep["model"].total_goals * g, host_adv=prep["model"].beta_home,
                               rho=prep["model"].rho, pen_k=0.4, sup_scale=s)
     return sim.run(n_sims=sims, seed=seed, known_group=kg, forced_knockout=ko), sim.chalk_bracket()
 

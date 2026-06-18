@@ -31,10 +31,11 @@ def _prep():
 
 
 @st.cache_data(show_spinner="Simulating tournaments…")
-def _sim(sims: int, seed: int, known_items=None, sup_scale: float = 1.0):
+def _sim(sims: int, seed: int, known_items=None, sup_scale: float = 1.0, goal_scale: float = 1.0):
     prep = _prep()
     kg = dict(known_items) if known_items else None
-    probs, chalk = run_simulation(prep, sims=sims, seed=seed, known_group=kg, sup_scale=sup_scale)
+    probs, chalk = run_simulation(prep, sims=sims, seed=seed, known_group=kg,
+                                  sup_scale=sup_scale, goal_scale=goal_scale)
     return probs, chalk
 
 
@@ -72,25 +73,28 @@ with st.sidebar:
                "(forecast auto-conditions on real results).")
     st.divider()
     st.subheader("Self-calibration")
-    can_calibrate = calib["scale"] is not None and calib["n"] > 0
+    can_calibrate = calib["n"] > 0
     use_calib = st.toggle(
-        f"Apply learned scale ({calib['scale']:.3f})" if can_calibrate else "Apply learned scale",
+        f"Apply learned calibration (gap ×{calib['sup_scale']:.3f}, goals ×{calib['goal_scale']:.3f})"
+        if can_calibrate else "Apply learned calibration",
         value=bool(calib["applied"]), disabled=not can_calibrate,
-        help="Stretches/compresses rating gaps based on how the model's own locked predictions "
-             "have scored so far. Needs ≥12 graded matches before it nudges anything.")
+        help="Rescales the rating gap (who wins, by how much) AND the expected goal total (how many "
+             "goals — which also sets the draw rate), fit jointly from the model's own locked "
+             "predictions vs the real scorelines. Needs ≥12 graded matches before it nudges anything.")
     if can_calibrate:
         st.caption(f"Fitted on {calib['n']} graded match(es). "
-                   + ("Self-correcting over/under-confidence." if calib["applied"]
+                   + ("Self-correcting margin & goal volume." if calib["applied"]
                       else "Too few results to apply automatically — toggle to preview."))
     else:
         st.caption("No graded matches yet — calibration unlocks once results come in.")
-    sup_scale = float(calib["scale"]) if (use_calib and can_calibrate) else 1.0
+    sup_scale = float(calib["sup_scale"]) if (use_calib and can_calibrate) else 1.0
+    goal_scale = float(calib["goal_scale"]) if (use_calib and can_calibrate) else 1.0
     st.divider()
     st.subheader("Learned weights")
     for f in sorted(FACTORS, key=lambda f: -model.weights[f]):
         st.progress(model.weights[f], text=f"{FACTOR_LABELS[f]} — {pct(model.weights[f])}")
 
-probs, chalk = _sim(int(sims), int(seed), sup_scale=sup_scale)
+probs, chalk = _sim(int(sims), int(seed), sup_scale=sup_scale, goal_scale=goal_scale)
 
 tabs = st.tabs(["🏆 Overview", "🔮 Match Predictor", "📈 Track Record", "📡 Live / What-if",
                 "📊 Model & Weights", "💪 Power Ratings", "🅰️ Groups", "🗺️ Knockouts",
@@ -121,7 +125,7 @@ with tabs[1]:
     if home == away:
         st.info("Pick two different teams.")
     else:
-        pr = predict_match(power, model, home, away, sup_scale=sup_scale)
+        pr = predict_match(power, model, home, away, sup_scale=sup_scale, goal_scale=goal_scale)
         m = st.columns(3)
         m[0].metric(f"{home} win", pct(pr["p_home"]))
         m[1].metric("Draw", pct(pr["p_draw"]))
@@ -137,7 +141,8 @@ with tabs[1]:
     st.subheader("Predicted scheduled fixtures")
     only_unplayed = st.checkbox("Only unplayed", value=True)
     gsel = st.selectbox("Group filter", ["All"] + sorted(power["group"].unique()))
-    pf = predict_fixtures(power, model, fixtures, only_unplayed=only_unplayed, sup_scale=sup_scale)
+    pf = predict_fixtures(power, model, fixtures, only_unplayed=only_unplayed,
+                          sup_scale=sup_scale, goal_scale=goal_scale)
     if gsel != "All":
         pf = pf[pf["group"] == gsel]
     st.dataframe(pf.style.format({"P(home win)": "{:.0%}", "P(draw)": "{:.0%}", "P(away win)": "{:.0%}"}),
@@ -160,8 +165,21 @@ with tabs[2]:
         k[2].metric("Log-loss", f"{track['logloss']:.3f}", f"{track['skill_pct']:+.0f}% skill vs coin-flip",
                     delta_color="normal")
         k[3].metric("Brier score", f"{track['brier']:.3f}", help="0 = perfect, lower is better")
-        st.caption(f"Mean expected-goal error: {track['mean_goal_err']:.2f} goals/match. "
-                   f"A 3-way coin-flip scores log-loss {1.0986:.3f}.")
+        st.caption(f"Mean margin error: {track['mean_goal_err']:.2f} goals/match (error in the goal "
+                   f"*difference*). A 3-way coin-flip scores log-loss {1.0986:.3f}.")
+
+        st.markdown("##### Goal volume & draws — is the model scoring the right *amount*?")
+        g2 = st.columns(2)
+        g2[0].metric("Goals/match — actual vs predicted", f"{track['goals_actual']:.2f}",
+                     f"{track['goals_bias']:+.2f} vs {track['goals_pred']:.2f} predicted",
+                     delta_color="off",
+                     help="Positive bias ⇒ real matches are out-scoring the model. The goals "
+                          "calibration (sidebar) lifts the forecast's goal total to close this.")
+        g2[1].metric("Draw rate — actual vs predicted", pct(track['draw_rate_actual']),
+                     f"{(track['draw_rate_actual'] - track['draw_rate_pred']) * 100:+.0f} pts vs "
+                     f"{pct(track['draw_rate_pred'])} predicted", delta_color="off",
+                     help="Actual share of draws vs the model's average draw probability. Raising the "
+                          "goal total lowers predicted draws, so the goals scale tunes this too.")
 
         st.markdown("##### Calibration — when the model is *this* confident, how often is it right?")
         cal = track["calibration"]
@@ -182,12 +200,19 @@ with tabs[2]:
                        "hit-rate ⇒ over-confident (scale < 1 corrects it); below ⇒ under-confident.")
 
         if calib["baseline_logloss"] is not None:
-            cc = st.columns(3)
-            cc[0].metric("Fitted scale", f"{calib['scale']:.3f}",
-                         "applied" if calib["applied"] else "preview only")
-            cc[1].metric("Log-loss @ scale 1.0", f"{calib['baseline_logloss']:.3f}")
-            cc[2].metric("Log-loss @ fitted scale", f"{calib['calibrated_logloss']:.3f}",
-                         f"{calib['calibrated_logloss'] - calib['baseline_logloss']:+.3f}",
+            st.markdown("##### Learned calibration (jointly fit on real scorelines)")
+            cc = st.columns(4)
+            cc[0].metric("Supremacy scale", f"{calib['sup_scale']:.3f}",
+                         "applied" if calib["applied"] else "preview only",
+                         help="<1 tempers favourites, >1 sharpens them.")
+            cc[1].metric("Goals scale", f"{calib['goal_scale']:.3f}",
+                         "applied" if calib["applied"] else "preview only",
+                         help=">1 lifts the expected goal total (and lowers the draw rate).")
+            cc[2].metric("Scoreline log-loss @ raw", f"{calib['baseline_scoreline_nll']:.3f}",
+                         help="The quantity the calibration minimises — negative log-likelihood of "
+                              "the actual scorelines (captures margin, goal volume AND draws).")
+            cc[3].metric("@ calibrated", f"{calib['calibrated_scoreline_nll']:.3f}",
+                         f"{calib['calibrated_scoreline_nll'] - calib['baseline_scoreline_nll']:+.3f}",
                          delta_color="inverse")
 
         st.markdown("##### Graded predictions")
@@ -223,7 +248,7 @@ with tabs[3]:
     active = st.session_state.get("whatif_active")
     if active:
         kg_dict_items = tuple(((h, a), (hs, as_)) for (h, a, hs, as_) in active)
-        wp, _ = _sim(int(sims), int(seed), kg_dict_items, sup_scale=sup_scale)
+        wp, _ = _sim(int(sims), int(seed), kg_dict_items, sup_scale=sup_scale, goal_scale=goal_scale)
         st.caption(f"Conditioned on {len(active)} entered result(s).")
         comp = pd.DataFrame({"baseline": probs["P_champion"], "conditioned": wp["P_champion"]})
         comp["Δ"] = comp["conditioned"] - comp["baseline"]

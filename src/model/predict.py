@@ -23,12 +23,14 @@ def _supremacy(power, model, home, away):
 
 
 def predict_match(power: pd.DataFrame, model, home: str, away: str, max_goals: int = 10,
-                  sup_scale: float = 1.0) -> dict:
-    """`sup_scale` rescales the goal-supremacy — 1.0 is the raw model; a value learned from
-    the model's own track record (see model.tracking.calibration_scale) self-corrects
-    over/under-confidence. <1 tempers favourites, >1 sharpens them."""
+                  sup_scale: float = 1.0, goal_scale: float = 1.0) -> dict:
+    """`sup_scale` rescales the goal-supremacy and `goal_scale` the expected goal total —
+    1.0 is the raw model; values learned from the model's own track record (see
+    model.tracking.calibration_scale) self-correct over/under-confidence and goal-volume
+    bias. sup_scale <1 tempers favourites, >1 sharpens them; goal_scale >1 lifts the total
+    (also lowering the draw rate)."""
     sup = _supremacy(power, model, home, away) * sup_scale
-    T = model.total_goals
+    T = model.total_goals * goal_scale
     la = max(MIN_LAMBDA, (T + sup) / 2.0)
     lb = max(MIN_LAMBDA, (T - sup) / 2.0)
     m = scoreline_matrix(la, lb, model.rho, max_goals)
@@ -43,7 +45,7 @@ def predict_match(power: pd.DataFrame, model, home: str, away: str, max_goals: i
 
 def predict_fixtures(power: pd.DataFrame, model, fixtures: pd.DataFrame,
                      only_unplayed: bool = True, stage: str | None = None,
-                     sup_scale: float = 1.0) -> pd.DataFrame:
+                     sup_scale: float = 1.0, goal_scale: float = 1.0) -> pd.DataFrame:
     """Predict every fixture (optionally a single stage / only the unplayed ones)."""
     f = fixtures
     if only_unplayed:
@@ -52,7 +54,7 @@ def predict_fixtures(power: pd.DataFrame, model, fixtures: pd.DataFrame,
         f = f[f["stage"] == stage]
     rows = []
     for r in f.itertuples():
-        pr = predict_match(power, model, r.home, r.away, sup_scale=sup_scale)
+        pr = predict_match(power, model, r.home, r.away, sup_scale=sup_scale, goal_scale=goal_scale)
         fav = max([(r.home, pr["p_home"]), ("Draw", pr["p_draw"]), (r.away, pr["p_away"])],
                   key=lambda x: x[1])
         rows.append({"date": r.date.date(), "group": r.group, "stage": r.stage,

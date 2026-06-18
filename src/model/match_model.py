@@ -8,10 +8,40 @@ Monte-Carlo simulation.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from scipy.stats import poisson
 
 MIN_LAMBDA = 0.15
+
+# Pre-computed log-factorials for the numpy-only fast path below (calibration calls it tens of
+# thousands of times, so we avoid scipy's per-call overhead there).
+_MAXG = 10
+_K = np.arange(_MAXG + 1)
+_LOG_FACT = np.array([math.lgamma(k + 1) for k in _K])
+
+
+def _dc_score_matrix(la, lb, rho):
+    """Normalised Dixon-Coles exact-score matrix (numpy-only fast path; scalar la/lb > 0)."""
+    gh = np.exp(-la + _K * np.log(la) - _LOG_FACT)
+    ga = np.exp(-lb + _K * np.log(lb) - _LOG_FACT)
+    m = np.outer(gh, ga)
+    m[0, 0] *= 1.0 - la * lb * rho
+    m[0, 1] *= 1.0 + la * rho
+    m[1, 0] *= 1.0 + lb * rho
+    m[1, 1] *= 1.0 - rho
+    return m / m.sum()
+
+
+def scoreline_prob(la, lb, i, j, rho=-0.12):
+    """Probability of the exact scoreline (i, j) under the Dixon-Coles double Poisson.
+
+    Goal counts above the internal grid are clamped to its edge (negligible probability).
+    Used by the calibration fit, which scores locked predictions against real scorelines.
+    """
+    m = _dc_score_matrix(la, lb, rho)
+    return float(m[min(int(i), _MAXG), min(int(j), _MAXG)])
 
 
 def expected_goals(r_home, r_away, elo_per_goal, total_goals, net_home_adv=0.0):
