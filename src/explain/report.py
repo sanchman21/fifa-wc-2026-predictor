@@ -51,11 +51,13 @@ def write_track_record(record: dict, calib: dict) -> str | None:
         f"| {r.date} | {r.match} | {r.predicted} ({r.pick:.0%}) | {r.score} ({r.actual}) "
         f"| {'✅' if r.correct else '❌'} |"
         for r in recent.itertuples())
-    calib_line = (f"Learned calibration scale **{calib['scale']:.3f}** "
+    calib_line = (f"Learned calibration — supremacy ×**{calib['sup_scale']:.3f}**, "
+                  f"goals ×**{calib['goal_scale']:.3f}** "
                   + ("(applied — " if calib["applied"] else "(not yet applied; needs ≥12 "
                      "graded matches before nudging — ")
-                  + (f"log-loss {calib['baseline_logloss']:.3f} → {calib['calibrated_logloss']:.3f})"
-                     if calib["baseline_logloss"] is not None else "no data)"))
+                  + (f"scoreline log-loss {calib['baseline_scoreline_nll']:.3f} → "
+                     f"{calib['calibrated_scoreline_nll']:.3f})"
+                     if calib["baseline_scoreline_nll"] is not None else "no data)"))
 
     md = f"""# Model Track Record
 
@@ -66,7 +68,9 @@ def write_track_record(record: dict, calib: dict) -> str | None:
 - **Brier score:** {record['brier']:.3f}  (lower is better; 0 = perfect)
 - **Log-loss:** {record['logloss']:.3f}  vs {0.0:.0f}… coin-flip {1.0986:.3f}
   → **{record['skill_pct']:+.0f}% skill** over a 3-way coin-flip
-- **Mean expected-goal error:** {record['mean_goal_err']:.2f} goals/match
+- **Mean margin error:** {record['mean_goal_err']:.2f} goals/match (error in the goal *difference*)
+- **Goals/match:** {record['goals_actual']:.2f} actual vs {record['goals_pred']:.2f} predicted ({record['goals_bias']:+.2f} bias — positive means the model under-predicts goals)
+- **Draw rate:** {record['draw_rate_actual']:.0%} actual vs {record['draw_rate_pred']:.0%} predicted
 - {calib_line}
 
 ## Calibration (reliability)

@@ -28,7 +28,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-from .match_model import scoreline_matrix
+from .match_model import scoreline_matrix, scoreline_prob
 from .predict import MIN_LAMBDA, _supremacy
 
 # Where the locked-prediction ledger lives. Defaults to the in-repo ``output/`` dir, but can be
@@ -46,14 +46,16 @@ _UNIFORM_LOGLOSS = math.log(3)            # skill baseline: a coin-flip over 3 o
 
 
 # --------------------------------------------------------------------------- core math
-def probs_from_supremacy(model, sup: float, max_goals: int = 10) -> dict:
+def probs_from_supremacy(model, sup: float, total: float | None = None,
+                         max_goals: int = 10) -> dict:
     """Win/draw/loss probabilities + expected goals for a given goal-supremacy.
 
     Identical Poisson/Dixon-Coles math to :func:`predict.predict_match`, but driven by a
     raw supremacy number so the calibration search can re-price a locked prediction under
-    a different supremacy scale without re-reading the power table.
+    a different supremacy scale (and, via ``total``, a different goal total) without
+    re-reading the power table. ``total`` defaults to the model's learned goal total.
     """
-    T = model.total_goals
+    T = model.total_goals if total is None else total
     la = max(MIN_LAMBDA, (T + sup) / 2.0)
     lb = max(MIN_LAMBDA, (T - sup) / 2.0)
     m = scoreline_matrix(la, lb, model.rho, max_goals)
@@ -92,15 +94,22 @@ def grade_entry(e: dict) -> dict | None:
     eps = 1e-12
     brier = sum((p[o] - (1.0 if o == act else 0.0)) ** 2 for o in _OUTCOMES)
     logloss = -math.log(max(eps, p[act]))
+    total_pred = e["exp_home"] + e["exp_away"]
+    total_actual = e["actual_home_score"] + e["actual_away_score"]
     return {
         "predicted": pred,
         "actual": act,
         "correct": int(pred == act),
         "p_actual": p[act],
+        "p_draw": e["p_draw"],
         "brier": brier,
         "logloss": logloss,
+        # margin error (goal difference) vs total-goals error (volume) — tracked separately
         "abs_goal_err": abs((e["exp_home"] - e["exp_away"])
                             - (e["actual_home_score"] - e["actual_away_score"])),
+        "total_pred": total_pred,
+        "total_actual": total_actual,
+        "total_err": total_actual - total_pred,   # +ve ⇒ the model under-predicted goals
     }
 
 
@@ -184,7 +193,8 @@ def graded_frame(ledger: dict) -> pd.DataFrame:
             "stage": e["stage"],
             "pick": e[f"p_{g['predicted']}"], "predicted": g["predicted"], "actual": g["actual"],
             "score": f"{e['actual_home_score']}-{e['actual_away_score']}",
-            **{k: g[k] for k in ("correct", "p_actual", "brier", "logloss", "abs_goal_err")},
+            **{k: g[k] for k in ("correct", "p_actual", "p_draw", "brier", "logloss",
+                                 "abs_goal_err", "total_pred", "total_actual", "total_err")},
         })
     df = pd.DataFrame(rows)
     return df.sort_values("date").reset_index(drop=True) if len(df) else df
@@ -220,7 +230,13 @@ def track_record(ledger: dict) -> dict:
         "logloss": logloss,
         "logloss_vs_uniform": _UNIFORM_LOGLOSS - logloss,   # >0 ⇒ better than a coin-flip
         "skill_pct": 100.0 * (1 - logloss / _UNIFORM_LOGLOSS),
-        "mean_goal_err": float(df["abs_goal_err"].mean()),
+        "mean_goal_err": float(df["abs_goal_err"].mean()),   # mean |margin| error (goal diff)
+        # goal-volume diagnostics: are real matches out-scoring the model, and is the draw rate right?
+        "goals_pred": float(df["total_pred"].mean()),
+        "goals_actual": float(df["total_actual"].mean()),
+        "goals_bias": float(df["total_err"].mean()),         # +ve ⇒ model under-predicts goals
+        "draw_rate_pred": float(df["p_draw"].mean()),        # model's mean P(draw)
+        "draw_rate_actual": float((df["actual"] == "draw").mean()),
         "calibration": calibration_bins(df),
         "frame": df,
     }
@@ -228,36 +244,67 @@ def track_record(ledger: dict) -> dict:
 
 # --------------------------------------------------------------------------- calibration
 def calibration_scale(ledger: dict, model, prior_strength: float = 12.0,
-                      lo: float = 0.6, hi: float = 1.4, steps: int = 81) -> dict:
-    """Fit a single multiplier on supremacy that minimises log-loss on graded matches.
+                      s_lo: float = 0.6, s_hi: float = 1.4,
+                      g_lo: float = 0.7, g_hi: float = 1.5, steps: int = 41) -> dict:
+    """Jointly fit a supremacy scale ``s`` and a total-goals scale ``g`` that minimise the
+    Dixon-Coles *scoreline* negative log-likelihood on graded matches.
 
-    Heavily shrunk toward 1.0: the objective adds ``prior_strength * (s-1)**2`` so it
-    behaves like ``prior_strength`` pseudo-matches voting for "no change". With only a few
-    real results the scale barely moves; it earns its keep once dozens of matches resolve.
-    ``scale < 1`` ⇒ the model was over-confident (favourites too strong), ``> 1`` ⇒ under.
+    Scoring the full scoreline (not just win/draw/loss) calibrates BOTH how lopsided the
+    model is (``s``, the goal *difference*) AND how many goals it expects (``g``, the goal
+    *total*). The goal-total knob also corrects the draw frequency — raising the total lowers
+    the Poisson probability of an exact tie — so the two halves of this feature share one fit.
+
+    Both scales are heavily shrunk toward 1.0: the objective adds
+    ``prior_strength * ((s-1)**2 + (g-1)**2)``, behaving like ``prior_strength`` pseudo-matches
+    voting for "no change", so a handful of early results can't whipsaw the live forecast.
+    ``s < 1`` ⇒ favourites were too strong; ``g > 1`` ⇒ the model under-predicted goals.
     """
     graded = [e for e in ledger.values()
               if e.get("resolved") and e.get("locked_pre_match", True)]
-    grid = np.linspace(lo, hi, steps)
     if not graded:
-        return {"scale": 1.0, "n": 0, "applied": False,
-                "baseline_logloss": None, "calibrated_logloss": None}
-
-    def mean_logloss(s):
-        tot = 0.0
-        for e in graded:
-            p = probs_from_supremacy(model, s * e["supremacy"])
-            tot += -math.log(max(1e-12, p[f"p_{e['actual_outcome']}"]))
-        return tot / len(graded)
+        return {"sup_scale": 1.0, "goal_scale": 1.0, "n": 0, "applied": False,
+                "baseline_logloss": None, "calibrated_logloss": None,
+                "baseline_scoreline_nll": None, "calibrated_scoreline_nll": None}
 
     n = len(graded)
-    losses = np.array([mean_logloss(s) for s in grid])
-    penalty = prior_strength * (grid - 1.0) ** 2 / n
-    best = grid[int(np.argmin(losses + penalty))]
+    T0 = model.total_goals
+    rho = model.rho
+
+    def scoreline_nll(s, g):
+        """Mean negative log-likelihood of the actual scorelines under scales (s, g)."""
+        T = g * T0
+        tot = 0.0
+        for e in graded:
+            sup = s * e["supremacy"]
+            la = max(MIN_LAMBDA, (T + sup) / 2.0)
+            lb = max(MIN_LAMBDA, (T - sup) / 2.0)
+            p = scoreline_prob(la, lb, e["actual_home_score"], e["actual_away_score"], rho)
+            tot += -math.log(max(1e-12, p))
+        return tot / n
+
+    def outcome_logloss(s, g):
+        """Mean 3-way (win/draw/loss) log-loss — the interpretable headline metric."""
+        tot = 0.0
+        for e in graded:
+            p = probs_from_supremacy(model, s * e["supremacy"], total=g * T0)
+            tot += -math.log(max(1e-12, p[f"p_{e['actual_outcome']}"]))
+        return tot / n
+
+    best_s, best_g, best_obj = 1.0, 1.0, math.inf
+    for s in np.linspace(s_lo, s_hi, steps):
+        for g in np.linspace(g_lo, g_hi, steps):
+            obj = scoreline_nll(s, g) + prior_strength * ((s - 1.0) ** 2 + (g - 1.0) ** 2) / n
+            if obj < best_obj:
+                best_obj, best_s, best_g = obj, float(s), float(g)
+
+    moved = abs(best_s - 1.0) > 1e-6 or abs(best_g - 1.0) > 1e-6
     return {
-        "scale": float(best),
+        "sup_scale": best_s,
+        "goal_scale": best_g,
         "n": n,
-        "applied": n >= 12 and abs(best - 1.0) > 1e-6,   # need real signal before nudging
-        "baseline_logloss": float(mean_logloss(1.0)),
-        "calibrated_logloss": float(mean_logloss(best)),
+        "applied": n >= 12 and moved,   # need real signal before nudging the live forecast
+        "baseline_logloss": float(outcome_logloss(1.0, 1.0)),
+        "calibrated_logloss": float(outcome_logloss(best_s, best_g)),
+        "baseline_scoreline_nll": float(scoreline_nll(1.0, 1.0)),
+        "calibrated_scoreline_nll": float(scoreline_nll(best_s, best_g)),
     }

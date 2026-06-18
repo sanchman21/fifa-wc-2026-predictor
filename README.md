@@ -140,27 +140,32 @@ The model keeps an honest scorecard of its own forecasts:
   (win/draw/loss probabilities, expected goals, supremacy) is snapshotted and **locked** into a
   persistent ledger (`output/prediction_log.json`); it is never overwritten. When the real score
   arrives (via **🔄 Refresh**), the locked entry is graded — outcome hit-rate, **Brier score**,
-  **log-loss** (vs a 3-way coin-flip), and expected-goal error. Predictions for matches already
-  played before tracking began are flagged and excluded, so the record stays genuinely
-  out-of-sample.
+  **log-loss** (vs a 3-way coin-flip), margin error, **goal-volume bias** (actual vs predicted
+  goals/match) and **draw rate** (actual vs predicted). Predictions for matches already played
+  before tracking began are flagged and excluded, so the record stays genuinely out-of-sample.
 - **Calibration (reliability).** Matches are bucketed by the model's confidence in its pick to
   check whether, e.g., its 70%-confident picks actually win ~70% of the time.
-- **Self-correction.** A single **supremacy scale** is fit to minimise log-loss over the graded
-  matches — heavily shrunk toward 1.0 (≈12 pseudo-matches voting for "no change"), so a handful of
-  results can't whipsaw it. Once ≥12 matches are graded it's applied automatically (scale < 1
-  tempers favourites if the model was over-confident, > 1 sharpens them); the sidebar toggle lets
-  you preview or disable it. The scale feeds both the Match Predictor and the full tournament
-  simulation (stretching rating *gaps*, leaving the host edge intact).
+- **Self-correction.** Two scales — a **supremacy scale** (the goal *difference*) and a **goals
+  scale** (the goal *total*) — are fit **jointly** by minimising the Dixon-Coles *scoreline*
+  negative log-likelihood over the graded matches, so the fit learns from the actual scores, not
+  just win/draw/loss. Scoring the full scoreline calibrates how lopsided the model is *and* how
+  many goals it expects; because raising the total lowers the Poisson draw probability, the goals
+  scale also corrects the **draw rate**. Both are heavily shrunk toward 1.0 (≈12 pseudo-matches
+  voting for "no change"), so a handful of results can't whipsaw them. Once ≥12 matches are graded
+  they apply automatically (supremacy < 1 tempers favourites if over-confident, > 1 sharpens them;
+  goals > 1 lifts the total if the model under-predicts scoring); the sidebar toggle lets you
+  preview or disable them. Both feed the Match Predictor and the full tournament simulation
+  (stretching rating *gaps* and the goal total, leaving the host edge intact).
 - Outputs: `output/track_record.md` + `output/track_record.csv`; the ledger
   `output/prediction_log.json` is committed so the record persists across runs and deploys.
 
 ## Interactive UI (`streamlit run app.py`)
 Twelve tabs: **Overview** · **Match Predictor** · **Track Record** (self-grading hit-rate,
-calibration, learned scale) · **Live / What-if** · **Model & Weights** (learned weights +
+calibration, goal-volume & draw-rate bias, learned scales) · **Live / What-if** · **Model & Weights** (learned weights +
 validation vs Elo-only) · **Power Ratings** (per-team factor attribution) · **Groups** ·
 **Knockouts** (stage heatmap, predicted bracket) · **Players** (top scorers, attack-talent ranks) ·
 **Squad** (official 26-man squads + EA ratings) · **Managers** (tenure + coaching effect) ·
-**Data** (downloads). A sidebar **self-calibration** toggle applies the track-record scale.
+**Data** (downloads). A sidebar **self-calibration** toggle applies the track-record scales.
 Training is cached; re-simulate, predict matches, refresh to live scores, or run what-ifs from the UI.
 
 ---
