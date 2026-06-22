@@ -8,11 +8,14 @@ counts/seeds, predict individual matches, refresh to the latest real scores, and
 """
 from __future__ import annotations
 
+import os
+
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 from src.data import fetch_data, fetch_skills, fetch_squads
+from src.data.config_loader import DATA_DIR
 from src.features.players import top_scorers
 from src.features.skills import DEFAULT_OVERALL, squad_rating
 from src.main import prepare_model, run_simulation
@@ -25,14 +28,40 @@ STAGES = ["P_reach_R32", "P_reach_R16", "P_reach_QF", "P_reach_SF", "P_reach_Fin
 STAGE_LABELS = ["R32", "R16", "QF", "SF", "Final", "Champion"]
 
 
-@st.cache_resource(show_spinner="Loading data, computing Elo, training weights…")
-def _prep():
+# Data files the trained model + simulation depend on. A change to any of these must bust
+# the caches below, otherwise (on a long-lived Streamlit Cloud process) the model keeps
+# serving the snapshot it computed at first load and fresh tournament scores never land.
+_DATA_FILES = ("results.csv", "goalscorers.csv", "shootouts.csv", "squads_2026.json")
+
+
+def _data_fingerprint():
+    """Cheap, deterministic token reflecting the freshness of the model's data files.
+
+    Returns a tuple of (filename, st_mtime_ns, st_size) per relevant file (missing files
+    recorded as None). Stable across reruns when nothing changed; changes the instant any
+    file is rewritten/touched/resized, which forces the cached functions to recompute."""
+    parts = []
+    for name in _DATA_FILES:
+        try:
+            s = os.stat(os.path.join(DATA_DIR, name))
+            parts.append((name, s.st_mtime_ns, s.st_size))
+        except OSError:
+            parts.append((name, None, None))  # tolerate a missing file
+    return tuple(parts)
+
+
+# ttl is belt-and-suspenders: even an in-place edit that the filesystem's mtime resolution
+# can't distinguish will eventually refresh during the live tournament.
+@st.cache_resource(show_spinner="Loading data, computing Elo, training weights…", ttl=600)
+def _prep(data_version):  # data_version (the fingerprint) is part of the cache key
     return prepare_model(verbose=False)
 
 
-@st.cache_data(show_spinner="Simulating tournaments…")
-def _sim(sims: int, seed: int, known_items=None, sup_scale: float = 1.0, goal_scale: float = 1.0):
-    prep = _prep()
+@st.cache_data(show_spinner="Simulating tournaments…", ttl=600)
+def _sim(sims: int, seed: int, data_version, known_items=None,
+         sup_scale: float = 1.0, goal_scale: float = 1.0):
+    # Use the SAME data_version that keyed prep, so sim and prep can never disagree.
+    prep = _prep(data_version)
     kg = dict(known_items) if known_items else None
     probs, chalk = run_simulation(prep, sims=sims, seed=seed, known_group=kg,
                                   sup_scale=sup_scale, goal_scale=goal_scale)
@@ -43,7 +72,10 @@ def pct(x):
     return f"{x*100:.1f}%"
 
 
-prep = _prep()
+# One fingerprint per script run; thread the SAME value into prep and every sim so they
+# stay consistent and a data change busts both caches together.
+data_version = _data_fingerprint()
+prep = _prep(data_version)
 teams, model, power, goals, managers, results, fixtures = (
     prep["teams"], prep["model"], prep["power"], prep["goals"],
     prep["managers"], prep["results"], prep["fixtures"])
@@ -64,7 +96,10 @@ with st.sidebar:
             fetch_data.fetch_all(force=True)
             fetch_skills.fetch_all(force=True)
             fetch_squads.fetch_squads(force=True)   # refresh official 26-man squads
+        # Clear both caches so a manual refresh forces a full recompute even if the new
+        # files happen to share the previous fingerprint (e.g. coarse mtime resolution).
         _prep.clear(); _sim.clear()
+        st.cache_data.clear(); st.cache_resource.clear()
         st.rerun()
     sims = st.select_slider("Simulations", [5000, 10000, 20000, 30000, 50000], value=20000)
     seed = st.number_input("Random seed", value=2026, step=1)
@@ -94,7 +129,7 @@ with st.sidebar:
     for f in sorted(FACTORS, key=lambda f: -model.weights[f]):
         st.progress(model.weights[f], text=f"{FACTOR_LABELS[f]} — {pct(model.weights[f])}")
 
-probs, chalk = _sim(int(sims), int(seed), sup_scale=sup_scale, goal_scale=goal_scale)
+probs, chalk = _sim(int(sims), int(seed), data_version, sup_scale=sup_scale, goal_scale=goal_scale)
 
 tabs = st.tabs(["🏆 Overview", "🔮 Match Predictor", "📈 Track Record", "📡 Live / What-if",
                 "📊 Model & Weights", "💪 Power Ratings", "🅰️ Groups", "🗺️ Knockouts",
@@ -248,7 +283,8 @@ with tabs[3]:
     active = st.session_state.get("whatif_active")
     if active:
         kg_dict_items = tuple(((h, a), (hs, as_)) for (h, a, hs, as_) in active)
-        wp, _ = _sim(int(sims), int(seed), kg_dict_items, sup_scale=sup_scale, goal_scale=goal_scale)
+        wp, _ = _sim(int(sims), int(seed), data_version, kg_dict_items,
+                     sup_scale=sup_scale, goal_scale=goal_scale)
         st.caption(f"Conditioned on {len(active)} entered result(s).")
         comp = pd.DataFrame({"baseline": probs["P_champion"], "conditioned": wp["P_champion"]})
         comp["Δ"] = comp["conditioned"] - comp["baseline"]
