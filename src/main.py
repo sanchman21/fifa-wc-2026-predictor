@@ -14,7 +14,7 @@ import os
 import sys
 import time
 
-from .data import fetch_data, fetch_skills, fetch_squads
+from .data import fetch_data, fetch_live, fetch_skills, fetch_squads
 from .data.config_loader import (DATA_DIR, load_bracket, load_managers, load_results,
                                  load_results_raw, load_shootouts, load_teams)
 from .explain import report
@@ -28,6 +28,12 @@ from .model.train import build_power_table, current_factor_table, train
 
 REF_DATE = "2026-06-11"
 
+# Live-overlay freshness guard: outside of an explicit --refresh, only hit the ESPN API at
+# most this often. A marker file records the last successful fetch; reruns/cache-misses within
+# the window reuse whatever is already in results.csv instead of hammering the endpoint.
+LIVE_FETCH_MARKER = os.path.join(DATA_DIR, ".live_last_fetch")
+LIVE_FETCH_MAX_AGE_S = 15 * 60  # 15 minutes
+
 
 def prepare_model(refresh=False, verbose=True):
     """Load data, compute Elo, train weights, build the power table. (Independent of #sims;
@@ -39,6 +45,46 @@ def prepare_model(refresh=False, verbose=True):
     fetch_data.fetch_all(force=refresh)
     fetch_skills.fetch_all(force=refresh)    # EA player ratings for the squad-skill factor
     fetch_squads.fetch_squads(force=refresh) # official 26-man squads (Wikipedia, no auth)
+
+    # LIVE OVERLAY: the martj42 history source lags 1-2 days behind kickoff, so before we read
+    # results.csv we top it up with ESPN's full-time same-day scores (fills NA fixture rows only,
+    # idempotent). This must run BEFORE load_results() so Elo, training and known_group_results
+    # all condition on the freshest played matches in this same run. Two safeguards:
+    #   1. Never break the forecast — any failure (network, parse, read-only FS) is swallowed and
+    #      we fall back to whatever is already in results.csv (mirrors the [track] block below).
+    #   2. Don't hammer ESPN — outside --refresh, skip the call if the marker shows we fetched
+    #      within the last LIVE_FETCH_MAX_AGE_S; on success the marker is touched to now.
+    try:
+        if refresh:
+            should_fetch, why = True, "forced (--refresh)"
+        else:
+            try:
+                age = time.time() - os.path.getmtime(LIVE_FETCH_MARKER)
+            except OSError:
+                age = None  # marker missing -> treat as stale
+            if age is None or age >= LIVE_FETCH_MAX_AGE_S:
+                should_fetch, why = True, "stale"
+            else:
+                should_fetch, why = False, f"last fetch {age/60:.0f}m ago"
+
+        if should_fetch:
+            res = fetch_live.merge_live_into_results()
+            n = res.get("filled", 0)
+            if n:
+                log(f"[live] overlaid {n} fresh ESPN result(s)")
+            else:
+                log("[live] no new results")
+            # Touch the marker only after a successful overlay so a failed fetch retries next run.
+            try:
+                with open(LIVE_FETCH_MARKER, "w", encoding="utf-8") as _fh:
+                    _fh.write(_dt.datetime.now().isoformat())
+            except OSError as exc:  # marker is best-effort; read-only FS must not break anything
+                log(f"[live] could not update fetch marker: {exc}")
+        else:
+            log(f"[live] skipped (guarded, {why})")
+    except Exception as exc:  # noqa: BLE001 - live overlay must never break the forecast
+        log(f"[live] skipped ({exc})")
+
     teams = load_teams(); bracket = load_bracket(); managers = load_managers()
     results = load_results()
     goals = load_goals(results, os.path.join(DATA_DIR, "goalscorers.csv"))

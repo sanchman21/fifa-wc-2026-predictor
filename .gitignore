@@ -17,6 +17,9 @@ kaggle.json
 data/ea_players_legacy.csv
 data/ea_players_current.csv
 
+# Live-overlay freshness marker (records the last ESPN fetch time) — runtime state, not source.
+data/.live_last_fetch
+
 # Assistant memory must never be committed to the project repo
 /memory/
 
