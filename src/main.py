@@ -116,7 +116,11 @@ def run_simulation(prep, sims=20000, seed=2026, known_group=None, forced_knockou
     sim = TournamentSimulator(prep["power"], prep["teams"], prep["bracket"], elo_per_goal=1.0,
                               total_goals=prep["model"].total_goals * g, host_adv=prep["model"].beta_home,
                               rho=prep["model"].rho, pen_k=0.4, sup_scale=s)
-    return sim.run(n_sims=sims, seed=seed, known_group=kg, forced_knockout=ko), sim.chalk_bracket()
+    probs = sim.run(n_sims=sims, seed=seed, known_group=kg, forced_knockout=ko)
+    chalk = sim.chalk_bracket()
+    # Bracket-aware headline final/champion (always a valid two-halves matchup, champion ∈ final).
+    chalk["most_likely_final"] = sim.most_likely_final()
+    return probs, chalk
 
 
 def build_forecast(sims=20000, seed=2026, refresh=False, verbose=True):

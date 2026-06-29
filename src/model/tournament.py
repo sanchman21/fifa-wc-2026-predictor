@@ -244,6 +244,16 @@ class TournamentSimulator:
                 match_winner[m["match"]] = w
                 np.add.at(reach[key], w, 1)
 
+        # Record, per simulation, which team emerged from EACH bracket half to reach the
+        # final, plus the eventual champion. The two semi-final winners feeding the final
+        # (W101 / W102) come from opposite halves of the draw by construction, so the modal
+        # team in each is a bracket-VALID finalist — used for a coherent headline final whose
+        # winner is necessarily one of the two finalists (see most_likely_final()).
+        final_m = self.bracket["final"][0]
+        self._finalist_top = match_winner[int(str(final_m["home"])[1:])]
+        self._finalist_bottom = match_winner[int(str(final_m["away"])[1:])]
+        self._champion = match_winner[final_m["match"]]
+
         # ---------------- assemble probability table ----------------
         out = pd.DataFrame(index=self.team_names)
         out["P_group_winner"] = grp_winner_cnt / n
@@ -255,6 +265,35 @@ class TournamentSimulator:
             "P_SF": "P_reach_SF", "P_Final": "P_reach_Final", "P_Champion": "P_champion"})
         out.index.name = "team"
         return out.sort_values("P_champion", ascending=False)
+
+    def most_likely_final(self):
+        """Bracket-aware predicted final, derived from the Monte-Carlo run.
+
+        The final pits the two semi-finals' modal winners against each other. Because those
+        two semi-finals are fed by opposite halves of the draw, the matchup is always a VALID
+        bracket final (two teams that really can meet there — never two same-half teams), and
+        the predicted champion is, by construction, one of the two finalists. Call after run().
+        """
+        if getattr(self, "_champion", None) is None:
+            raise RuntimeError("most_likely_final() requires a completed run()")
+        nteams = len(self.team_names)
+        n = len(self._champion)
+        top = int(np.bincount(self._finalist_top, minlength=nteams).argmax())
+        bottom = int(np.bincount(self._finalist_bottom, minlength=nteams).argmax())
+        champ_cnt = np.bincount(self._champion, minlength=nteams)
+        # The more likely title winner of the two modal finalists.
+        champ = top if champ_cnt[top] >= champ_cnt[bottom] else bottom
+        return {
+            "home": self.team_names[top],
+            "away": self.team_names[bottom],
+            "champion": self.team_names[champ],
+            "p_home_reaches_final": float((self._finalist_top == top).mean()),
+            "p_away_reaches_final": float((self._finalist_bottom == bottom).mean()),
+            "p_this_exact_final": float(((self._finalist_top == top)
+                                         & (self._finalist_bottom == bottom)).mean()),
+            "home_p_champion": float(champ_cnt[top] / n),
+            "away_p_champion": float(champ_cnt[bottom] / n),
+        }
 
     @staticmethod
     def _slot_id(k):

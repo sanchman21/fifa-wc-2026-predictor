@@ -102,11 +102,19 @@ tabs = st.tabs(["🏆 Overview", "🔮 Match Predictor", "📈 Track Record", "�
 
 # ---------------------------------------------------------------- Overview
 with tabs[0]:
+    mlf = chalk["most_likely_final"]
+    runner_up = mlf["away"] if mlf["champion"] == mlf["home"] else mlf["home"]
     c1, c2, c3 = st.columns(3)
-    c1.metric("Most likely champion", probs.index[0], pct(probs.iloc[0]["P_champion"]))
-    fin = chalk["rounds"]["final"][0]
-    c2.metric("Predicted final (chalk)", f"{fin[0]} vs {fin[1]}")
-    c3.metric("Predicted winner (chalk)", fin[2])
+    c1.metric("Predicted champion", mlf["champion"], pct(probs.loc[mlf["champion"], "P_champion"]))
+    c2.metric("Predicted final", f"{mlf['home']} vs {mlf['away']}",
+              help="The two semi-final winners feeding the final come from opposite halves of "
+                   "the draw, so this matchup is always bracket-valid and the champion is one of "
+                   f"these two. This exact final occurs in {pct(mlf['p_this_exact_final'])} of sims.")
+    c3.metric("Runner-up", runner_up)
+    st.caption(f"Most likely to reach the final from each half: **{mlf['home']}** "
+               f"({pct(mlf['p_home_reaches_final'])}) vs **{mlf['away']}** "
+               f"({pct(mlf['p_away_reaches_final'])}). The predicted champion is the more likely "
+               "title winner of the two — guaranteed to be one of the predicted finalists.")
     st.subheader("Title odds")
     d = probs.sort_values("P_champion", ascending=False).head(16).rename_axis("team").reset_index()
     d["pct"] = d["P_champion"] * 100
@@ -323,11 +331,19 @@ with tabs[7]:
     heat.columns = STAGE_LABELS
     st.dataframe(heat.style.format("{:.0%}").background_gradient(cmap="YlOrRd", axis=None),
                  use_container_width=True, height=560)
-    st.subheader("Predicted most-likely path (chalk bracket)")
+    mlf = chalk["most_likely_final"]
+    st.subheader("Bracket-aware predicted final")
+    st.write(f"**Final:** {mlf['home']} vs {mlf['away']}  →  🏆 **{mlf['champion']}**")
+    st.caption(f"Each half's modal finalist: {mlf['home']} reaches the final from the top half in "
+               f"{pct(mlf['p_home_reaches_final'])} of sims, {mlf['away']} from the bottom half in "
+               f"{pct(mlf['p_away_reaches_final'])}. Because the two come from opposite halves of "
+               "the draw, this is always a valid matchup and the champion is one of the two.")
+    st.divider()
+    st.subheader("Single most-likely path (chalk — stronger team always advances)")
     for label, key in [("Semi-finals", "semi_finals"), ("Final", "final")]:
         for mm2 in chalk["rounds"][key]:
             st.write(f"**{label}:** {mm2[0]} vs {mm2[1]}  →  **{mm2[2]}**")
-    st.success(f"🏆 Predicted champion: **{chalk['champion']}**")
+    st.caption(f"Deterministic illustrative path; champion **{chalk['champion']}**.")
 
 # ---------------------------------------------------------------- Players
 with tabs[8]:

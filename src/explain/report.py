@@ -190,7 +190,8 @@ def write_report(power, probs, model, chalk, elo, n_sims):
 
     sf = chalk["rounds"]["semi_finals"]; fn = chalk["rounds"]["final"][0]
     qf = chalk["rounds"]["quarter_finals"]
-    champ = probs.index[0]; champ_p = probs.iloc[0]["P_champion"]
+    mlf = chalk["most_likely_final"]
+    champ = mlf["champion"]; champ_p = probs.loc[champ, "P_champion"]
 
     md = f"""# FIFA World Cup 2026 — Statistical Forecast
 
@@ -200,6 +201,10 @@ def write_report(power, probs, model, chalk, elo, n_sims):
 ## Headline
 
 - **Most likely champion: {champ} ({pct(champ_p)})**
+- **Predicted final: {mlf['home']} vs {mlf['away']} → 🏆 {champ}** — each half's modal finalist
+  ({mlf['home']} reaches the final from one half in {pct(mlf['p_home_reaches_final'])} of sims,
+  {mlf['away']} from the other in {pct(mlf['p_away_reaches_final'])}). The two come from opposite
+  halves of the draw, so the matchup is bracket-valid and the champion is one of the two finalists.
 - The 48-team tournament is simulated {n_sims:,} times — group stage (FIFA tiebreakers),
   the 8-best-third-placed allocation, and the full knockout bracket exactly as drawn.
 
@@ -239,7 +244,10 @@ See `output/factor_weights.png`, `output/power_breakdown.png`, `output/stage_hea
 
 {chr(10).join(stage_favs)}
 
-## Predicted single most-likely path
+## Predicted single most-likely path (chalk — stronger team always advances)
+
+*Deterministic illustrative path; the headline final/champion above is the bracket-aware
+Monte-Carlo prediction.*
 
 - **Semi-finals:** {sf[0][0]} vs {sf[0][1]} → **{sf[0][2]}**; {sf[1][0]} vs {sf[1][1]} → **{sf[1][2]}**
 - **Final:** {fn[0]} vs {fn[1]} → **🏆 {fn[2]}**
