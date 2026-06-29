@@ -19,7 +19,7 @@ from src.data.config_loader import DATA_DIR
 from src.features.players import top_scorers
 from src.features.skills import DEFAULT_OVERALL, squad_rating
 from src.main import prepare_model, run_simulation
-from src.model.predict import predict_fixtures, predict_match
+from src.model.predict import predict_fixtures, predict_knockout, predict_match
 from src.model.train import FACTORS, FACTOR_LABELS
 
 st.set_page_config(page_title="WC 2026 Forecast", page_icon="🏆", layout="wide")
@@ -138,18 +138,33 @@ tabs = st.tabs(["🏆 Overview", "🔮 Match Predictor", "📈 Track Record", "�
 # ---------------------------------------------------------------- Overview
 with tabs[0]:
     mlf = chalk["most_likely_final"]
-    runner_up = mlf["away"] if mlf["champion"] == mlf["home"] else mlf["home"]
+    # Bracket-aware final (each half's modal finalist) + the result/penalty winner of THAT tie,
+    # so the champion is both bracket-valid and consistent with the predicted final's scoreline.
+    fpred = predict_knockout(power, model, mlf["home"], mlf["away"],
+                             sup_scale=sup_scale, goal_scale=goal_scale)
+    pen_edge = mlf["home"] if fpred["p_home_pens"] >= 0.5 else mlf["away"]
+    top_score, top_p = fpred["scorelines"][0]
     c1, c2, c3 = st.columns(3)
-    c1.metric("Predicted champion", mlf["champion"], pct(probs.loc[mlf["champion"], "P_champion"]))
-    c2.metric("Predicted final", f"{mlf['home']} vs {mlf['away']}",
-              help="The two semi-final winners feeding the final come from opposite halves of "
-                   "the draw, so this matchup is always bracket-valid and the champion is one of "
-                   f"these two. This exact final occurs in {pct(mlf['p_this_exact_final'])} of sims.")
-    c3.metric("Runner-up", runner_up)
-    st.caption(f"Most likely to reach the final from each half: **{mlf['home']}** "
-               f"({pct(mlf['p_home_reaches_final'])}) vs **{mlf['away']}** "
-               f"({pct(mlf['p_away_reaches_final'])}). The predicted champion is the more likely "
-               "title winner of the two — guaranteed to be one of the predicted finalists.")
+    c1.metric("Predicted final", f"{mlf['home']} vs {mlf['away']}",
+              help="The two semi-final winners feeding the final come from opposite halves of the "
+                   "draw, so this matchup is always bracket-valid and the winner is one of these "
+                   f"two. This exact final occurs in {pct(mlf['p_this_exact_final'])} of sims.")
+    c2.metric("Predicted winner", fpred["winner"],
+              "on penalties" if fpred["decided_on_pens"] else None, delta_color="off")
+    c3.metric("Most likely score", top_score, f"{pct(top_p)} probability", delta_color="off")
+    base = (f"Each half's modal finalist: **{mlf['home']}** ({pct(mlf['p_home_reaches_final'])}) vs "
+            f"**{mlf['away']}** ({pct(mlf['p_away_reaches_final'])}) — opposite halves, so always a "
+            f"valid matchup. Outcome: **{mlf['home']} {pct(fpred['p_home'])}** · draw "
+            f"{pct(fpred['p_draw'])} · **{mlf['away']} {pct(fpred['p_away'])}**; the winner is the "
+            "most likely result (every exact scoreline has a probability — the single most likely "
+            "is shown above).")
+    if fpred["decided_on_pens"]:
+        st.caption(base + f" Here a draw is the most likely result, so the final goes to "
+                   f"penalties — **{pen_edge}** holds the shootout edge "
+                   f"({pct(max(fpred['p_home_pens'], 1 - fpred['p_home_pens']))} to win it).")
+    else:
+        st.caption(base + f" A level final would go to penalties, where **{pen_edge}** "
+                   "holds the shootout edge.")
     st.subheader("Title odds")
     d = probs.sort_values("P_champion", ascending=False).head(16).rename_axis("team").reset_index()
     d["pct"] = d["P_champion"] * 100
@@ -180,6 +195,28 @@ with tabs[1]:
             y=alt.Y("score:N", sort="-x", title="most likely scorelines"),
             tooltip=["score", alt.Tooltip("prob:Q", format=".1%")]).properties(height=240),
             use_container_width=True)
+
+        kp = predict_knockout(power, model, home, away, sup_scale=sup_scale, goal_scale=goal_scale)
+        pen_fav = home if kp["p_home_pens"] >= 0.5 else away
+        st.markdown("##### As a knockout tie — winner is the most likely result")
+        kc = st.columns(2)
+        kc[0].metric("Advances", kp["winner"],
+                     "on penalties" if kp["decided_on_pens"] else None, delta_color="off")
+        kc[1].metric("Shootout edge", pen_fav,
+                     f"{pct(max(kp['p_home_pens'], 1 - kp['p_home_pens']))} to win pens",
+                     delta_color="off")
+
+        def _penrec(t):
+            w, n = int(power.loc[t, "pen_wins"]), int(power.loc[t, "pen_total"])
+            return f"{w}/{n} ({w / n:.0%})" if n else "no shootout history"
+        st.caption(
+            f"The advancing team is the most likely result (win/draw/loss above; the scoreline "
+            f"probabilities are charted). "
+            + (f"Here a draw is most likely, so it goes to penalties and **{kp['winner']}** advances. "
+               if kp["decided_on_pens"]
+               else f"A draw — the only path to penalties — would send **{pen_fav}** through on its "
+                    "shootout edge. ")
+            + f"Historical shootout record: **{home}** {_penrec(home)}, **{away}** {_penrec(away)}.")
     st.divider()
     st.subheader("Predicted scheduled fixtures")
     only_unplayed = st.checkbox("Only unplayed", value=True)
@@ -380,6 +417,18 @@ with tabs[7]:
         for mm2 in chalk["rounds"][key]:
             st.write(f"**{label}:** {mm2[0]} vs {mm2[1]}  →  **{mm2[2]}**")
     st.caption(f"Deterministic illustrative path; champion **{chalk['champion']}**.")
+
+    st.divider()
+    st.subheader("Penalty-shootout skill — decides drawn knockout ties")
+    st.caption("Historical shootout win rate, shrunk toward 50% and shown as a log-odds rating "
+               "(0 = average). Drawn knockout ties in the simulation are resolved by this skill, "
+               "not by open-play strength — so a strong-on-paper side with a poor shootout record "
+               "can still go out on penalties.")
+    pen = power[["pen_wins", "pen_total", "pen_win_rate", "pen_skill"]].copy()
+    pen = pen[pen["pen_total"] > 0].sort_values("pen_skill", ascending=False)
+    pen.columns = ["Shootout wins", "Shootouts", "Win rate", "Penalty rating"]
+    st.dataframe(pen.style.format({"Win rate": "{:.0%}", "Penalty rating": "{:+.2f}"}),
+                 use_container_width=True, height=360)
 
 # ---------------------------------------------------------------- Players
 with tabs[8]:

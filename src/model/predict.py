@@ -43,6 +43,41 @@ def predict_match(power: pd.DataFrame, model, home: str, away: str, max_goals: i
             "scorelines": [(f"{i}-{j}", p) for (i, j), p in flat[:6]]}
 
 
+def _pen_skill(power: pd.DataFrame, team: str) -> float:
+    """Log-odds penalty rating for a team (0 = average) if the column is present."""
+    if "pen_skill" in power.columns:
+        return float(power.loc[team, "pen_skill"])
+    return 0.0
+
+
+def predict_knockout(power: pd.DataFrame, model, home: str, away: str,
+                     sup_scale: float = 1.0, goal_scale: float = 1.0) -> dict:
+    """A knockout tie: the most-likely RESULT and the single winner it gives.
+
+    The winner is the most likely of {home win, draw, away win} — an aggregate over the full
+    scoreline distribution (`scorelines` carries each exact score's probability). A predicted
+    draw is the only case that goes to penalties, decided by penalty SKILL: a Bradley-Terry coin
+    on the log-odds shootout ratings. We deliberately do NOT collapse the distribution to a
+    single "predicted score": the most-probable exact score is a draw (usually 1-1) for almost
+    every match, while the most-probable result is a win, so no one score represents both. The
+    caller shows the score distribution (and the most-likely exact score with its probability)
+    alongside the result. (Inside the Monte-Carlo simulation every level tie still goes to pens.)
+    """
+    pr = predict_match(power, model, home, away, sup_scale=sup_scale, goal_scale=goal_scale)
+    sh, sa = _pen_skill(power, home), _pen_skill(power, away)
+    p_home_pens = 1.0 / (1.0 + np.exp(-(sh - sa)))
+    ph, pd_, pa = pr["p_home"], pr["p_draw"], pr["p_away"]
+    if pd_ > ph and pd_ > pa:                                   # most likely result is a draw
+        result, winner, decided_on_pens = "draw", (home if p_home_pens >= 0.5 else away), True
+    elif ph >= pa:                                             # most likely result is a home win
+        result, winner, decided_on_pens = "home", home, False
+    else:                                                       # most likely result is an away win
+        result, winner, decided_on_pens = "away", away, False
+    pr.update({"pen_home": sh, "pen_away": sa, "p_home_pens": float(p_home_pens),
+               "result": result, "winner": winner, "decided_on_pens": bool(decided_on_pens)})
+    return pr
+
+
 def predict_fixtures(power: pd.DataFrame, model, fixtures: pd.DataFrame,
                      only_unplayed: bool = True, stage: str | None = None,
                      sup_scale: float = 1.0, goal_scale: float = 1.0) -> pd.DataFrame:
@@ -54,11 +89,17 @@ def predict_fixtures(power: pd.DataFrame, model, fixtures: pd.DataFrame,
         f = f[f["stage"] == stage]
     rows = []
     for r in f.itertuples():
-        pr = predict_match(power, model, r.home, r.away, sup_scale=sup_scale, goal_scale=goal_scale)
-        fav = max([(r.home, pr["p_home"]), ("Draw", pr["p_draw"]), (r.away, pr["p_away"])],
-                  key=lambda x: x[1])
+        if r.stage == "knockout":
+            # A knockout can't end level: the favourite is whoever ADVANCES (draws -> penalties),
+            # so the most-likely scoreline and the predicted winner stay consistent.
+            pr = predict_knockout(power, model, r.home, r.away, sup_scale=sup_scale, goal_scale=goal_scale)
+            fav = pr["winner"]
+        else:
+            pr = predict_match(power, model, r.home, r.away, sup_scale=sup_scale, goal_scale=goal_scale)
+            fav = max([(r.home, pr["p_home"]), ("Draw", pr["p_draw"]), (r.away, pr["p_away"])],
+                      key=lambda x: x[1])[0]
         rows.append({"date": r.date.date(), "group": r.group, "stage": r.stage,
                      "home": r.home, "away": r.away,
                      "P(home win)": pr["p_home"], "P(draw)": pr["p_draw"], "P(away win)": pr["p_away"],
-                     "most likely": pr["scorelines"][0][0], "favorite": fav[0]})
+                     "most likely": pr["scorelines"][0][0], "favorite": fav})
     return pd.DataFrame(rows)

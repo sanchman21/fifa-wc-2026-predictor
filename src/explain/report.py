@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from ..model.predict import predict_knockout
 from ..model.train import FACTORS, FACTOR_LABELS
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "output")
@@ -151,7 +152,7 @@ def make_charts(power, probs, model):
     chart_weights(model); chart_stage_heatmap(probs)
 
 
-def write_report(power, probs, model, chalk, elo, n_sims):
+def write_report(power, probs, model, chalk, elo, n_sims, sup_scale=1.0, goal_scale=1.0):
     _ensure_out()
     pct = lambda x: f"{x * 100:.1f}%"
     m = model.metrics
@@ -191,7 +192,18 @@ def write_report(power, probs, model, chalk, elo, n_sims):
     sf = chalk["rounds"]["semi_finals"]; fn = chalk["rounds"]["final"][0]
     qf = chalk["rounds"]["quarter_finals"]
     mlf = chalk["most_likely_final"]
-    champ = mlf["champion"]; champ_p = probs.loc[champ, "P_champion"]
+    # Winner of the BRACKET-AWARE final (each half's modal finalist): the most likely result of
+    # that matchup, with a draw broken on penalty-shootout skill. So the champion is both
+    # bracket-valid (one of the two finalists) and consistent with the predicted final.
+    fpred = predict_knockout(power, model, mlf["home"], mlf["away"],
+                             sup_scale=sup_scale, goal_scale=goal_scale)
+    champ = fpred["winner"]; champ_p = probs.loc[champ, "P_champion"]
+    top_score, top_p = fpred["scorelines"][0]
+    final_line = (f"{mlf['home']} vs {mlf['away']} → 🏆 {champ} "
+                  f"({mlf['home']} {pct(fpred['p_home'])} / draw {pct(fpred['p_draw'])} / "
+                  f"{mlf['away']} {pct(fpred['p_away'])}; most likely score {top_score} {pct(top_p)}"
+                  + ("; a draw is most likely, so decided on penalties)" if fpred["decided_on_pens"]
+                     else ")"))
 
     md = f"""# FIFA World Cup 2026 — Statistical Forecast
 
@@ -200,11 +212,13 @@ def write_report(power, probs, model, chalk, elo, n_sims):
 
 ## Headline
 
-- **Most likely champion: {champ} ({pct(champ_p)})**
-- **Predicted final: {mlf['home']} vs {mlf['away']} → 🏆 {champ}** — each half's modal finalist
-  ({mlf['home']} reaches the final from one half in {pct(mlf['p_home_reaches_final'])} of sims,
-  {mlf['away']} from the other in {pct(mlf['p_away_reaches_final'])}). The two come from opposite
-  halves of the draw, so the matchup is bracket-valid and the champion is one of the two finalists.
+- **Predicted final: {final_line}**
+- Each half's modal finalist: **{mlf['home']}** reaches the final from one half in
+  {pct(mlf['p_home_reaches_final'])} of sims, **{mlf['away']}** from the other in
+  {pct(mlf['p_away_reaches_final'])}. They come from opposite halves of the draw, so the matchup
+  is bracket-valid. The champion is the most likely result of that final (all-paths title odds
+  {pct(champ_p)}), so it is always one of the two finalists — and a draw, the only path to
+  penalties, is broken by penalty-shootout skill, not open-play strength.
 - The 48-team tournament is simulated {n_sims:,} times — group stage (FIFA tiebreakers),
   the 8-best-third-placed allocation, and the full knockout bracket exactly as drawn.
 
@@ -247,7 +261,8 @@ See `output/factor_weights.png`, `output/power_breakdown.png`, `output/stage_hea
 ## Predicted single most-likely path (chalk — stronger team always advances)
 
 *Deterministic illustrative path; the headline final/champion above is the bracket-aware
-Monte-Carlo prediction.*
+Monte-Carlo prediction, whose winner is the most likely result (a level final broken on
+penalty-shootout skill).*
 
 - **Semi-finals:** {sf[0][0]} vs {sf[0][1]} → **{sf[0][2]}**; {sf[1][0]} vs {sf[1][1]} → **{sf[1][2]}**
 - **Final:** {fn[0]} vs {fn[1]} → **🏆 {fn[2]}**
