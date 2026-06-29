@@ -76,22 +76,26 @@ def _build_allocation_table(group_letters):
 class TournamentSimulator:
     def __init__(self, power_df: pd.DataFrame, teams: pd.DataFrame, bracket: dict,
                  elo_per_goal: float, total_goals: float, host_adv: float,
-                 rho: float = -0.12, pen_k: float = 0.4, sup_scale: float = 1.0):
+                 rho: float = -0.12, sup_scale: float = 1.0):
         # Ratings are in goal-supremacy units (from the trained model), so elo_per_goal=1.0
-        # and host_adv is the learned home/host edge in goals. pen_k scales the penalty coin.
+        # and host_adv is the learned home/host edge in goals. Drawn knockout ties are decided
+        # by the teams' penalty-skill ratings (see _play_knockout / self.pen_skill).
         # sup_scale (from the model's own track record) stretches/compresses every rating GAP
         # around the mean to self-correct over/under-confidence, leaving the host edge intact.
         self.bracket = bracket
         self.elo_per_goal = elo_per_goal
         self.total_goals = total_goals
         self.host_adv = host_adv
-        self.pen_k = pen_k
 
         self.team_names = list(power_df.index)
         self.idx = {t: i for i, t in enumerate(self.team_names)}
         R = power_df["power_score"].to_numpy(float)
         self.R = R.mean() + sup_scale * (R - R.mean())   # scale gaps, not absolute level
         self.host = teams.reindex(self.team_names)["host"].fillna(False).to_numpy(bool)
+        # Penalty-shootout skill (log-odds; 0 = average). Drawn knockout ties are decided by
+        # who is better at penalties, not by open-play strength. Absent column -> neutral coin.
+        self.pen_skill = (power_df["pen_skill"].to_numpy(float) if "pen_skill" in power_df.columns
+                          else np.zeros(len(self.team_names)))
 
         # group letter -> ordered team indices (by position A1..A4)
         tdf = teams.reindex(self.team_names).copy()
@@ -111,7 +115,9 @@ class TournamentSimulator:
         la, lb = expected_goals(rh, ra, self.elo_per_goal, self.total_goals, net)
         gh = rng.poisson(la)
         ga = rng.poisson(lb)
-        p_home = 1.0 / (1.0 + np.exp(-self.pen_k * (rh - ra + net)))
+        # Draw after regulation/ET -> penalties, decided by each team's penalty SKILL (not its
+        # open-play rating): Bradley-Terry coin on the log-odds shootout ratings.
+        p_home = 1.0 / (1.0 + np.exp(-(self.pen_skill[home_idx] - self.pen_skill[away_idx])))
         pen_home = rng.random(len(home_idx)) < p_home
         return np.where(gh > ga, home_idx,
                         np.where(ga > gh, away_idx,

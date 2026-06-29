@@ -20,6 +20,7 @@ from .data.config_loader import (DATA_DIR, load_bracket, load_managers, load_res
 from .explain import report
 from .features.elo import compute_elo
 from .features.fixtures import known_group_results, known_knockout_results, wc2026_matches
+from .features.penalties import penalty_table
 from .features.players import load_goals
 from .features.skills import current_squads, squads_meta
 from .model import tracking
@@ -110,9 +111,18 @@ def prepare_model(refresh=False, verbose=True):
     official = sum(1 for sq in squads.values() if len(sq) and bool(sq["callup"].iloc[0]))
     log(f"[squads] squad-skill from official lists for {official}/{len(teams)} teams")
 
+    # Penalty-shootout skill (separate from open-play strength): historical shootout win rate,
+    # shrunk toward 50%, as a log-odds rating. Attached to the power table so the simulator and
+    # the per-match predictor resolve drawn knockout ties by who is better at penalties.
+    shootouts = load_shootouts()
+    pens = penalty_table(shootouts, teams)
+    power = power.join(pens)
+    log(f"[pens] penalty ratings for {int(pens['pen_total'].gt(0).sum())}/{len(teams)} teams "
+        f"with shootout history")
+
     fixtures = wc2026_matches(load_results_raw(), teams)
     known = known_group_results(fixtures)
-    known_ko = known_knockout_results(fixtures, teams, load_shootouts())
+    known_ko = known_knockout_results(fixtures, teams, shootouts)
     if known or known_ko:
         log(f"[live] conditioning on {len(known)} group + {len(known_ko)} knockout result(s)")
 
@@ -161,7 +171,7 @@ def run_simulation(prep, sims=20000, seed=2026, known_group=None, forced_knockou
     g = prep.get("goal_scale", 1.0) if goal_scale is None else goal_scale
     sim = TournamentSimulator(prep["power"], prep["teams"], prep["bracket"], elo_per_goal=1.0,
                               total_goals=prep["model"].total_goals * g, host_adv=prep["model"].beta_home,
-                              rho=prep["model"].rho, pen_k=0.4, sup_scale=s)
+                              rho=prep["model"].rho, sup_scale=s)
     probs = sim.run(n_sims=sims, seed=seed, known_group=kg, forced_knockout=ko)
     chalk = sim.chalk_bracket()
     # Bracket-aware headline final/champion (always a valid two-halves matchup, champion ∈ final).
@@ -191,7 +201,8 @@ def main(argv=None):
 
     report.save_csvs(R["power"], R["probs"])
     report.make_charts(R["power"], R["probs"], R["model"])
-    report.write_report(R["power"], R["probs"], R["model"], R["chalk"], R["elo"], R["sims"])
+    report.write_report(R["power"], R["probs"], R["model"], R["chalk"], R["elo"], R["sims"],
+                        sup_scale=R["sup_scale"], goal_scale=R["goal_scale"])
     report.write_track_record(R["track_record"], R["calibration"])
 
     print("-" * 64)
