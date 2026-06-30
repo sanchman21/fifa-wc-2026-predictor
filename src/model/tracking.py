@@ -14,9 +14,15 @@ The flow is deliberately honest:
    over- or under-confident. The scale is heavily shrunk toward 1.0 so a handful of
    matches can't whipsaw it.
 
-A prediction made for a match that was *already* played before we first tracked it is
+A group prediction made for a match that was *already* played before we first tracked it is
 still recorded, but flagged ``locked_pre_match=False`` and excluded from grading — the
 current power table already reflects that result, so scoring it would be circular.
+
+Knockout ties never get a pre-match lock at all: they only enter the feed once finished. So
+their pre-kickoff forecast is *reconstructed* by rolling the two sides' Elo back to their
+pre-match value (every other factor is frozen at the tournament-start snapshot) — exactly what
+the model would have predicted before kickoff — and graded out-of-sample. See
+:func:`_played_knockout_pre_probs`.
 """
 from __future__ import annotations
 
@@ -143,35 +149,102 @@ def save_ledger(ledger: dict, path: str = LEDGER_PATH) -> None:
             continue
 
 
+def _played_knockout_pre_probs(power: pd.DataFrame, model, elo, fixtures: pd.DataFrame) -> dict:
+    """Reconstruct the *pre-kickoff* forecast for every PLAYED knockout tie.
+
+    Knockout ties never appear in the results feed until they have already finished (the feed
+    only pre-loads the group schedule; a knockout row is appended by the live overlay once the
+    score is in). So the only prediction otherwise available for them is contaminated — the
+    power table's Elo has already absorbed the tie's own result — which is why they were written
+    off ``locked_pre_match=False`` and never graded.
+
+    But that contamination is *entirely* in the Elo factor: every other factor (squad skill,
+    form, coach, attack talent, host edge) is frozen at the tournament-start snapshot, and the
+    power table is built once per run, so two teams' predictions differ from their pre-match
+    form only by their own Elo movement. The Elo engine already records each match's pre-match
+    ratings (``elo.pre``), and the Elo term enters supremacy linearly with fixed standardisation
+    (``z = (elo - mean) / sd``), so rolling the two sides' Elo back to their pre-match value
+    yields *exactly* the forecast the model would have committed to before kickoff — a genuine
+    out-of-sample prediction we can grade. Returns ``{(home, away): {supremacy, p_*, exp_*}}``
+    keyed by display name for each played knockout tie we could reconstruct.
+    """
+    out: dict = {}
+    pre = getattr(elo, "pre", None)
+    if elo is None or pre is None or "elo" not in getattr(model, "betas", {}):
+        return out
+    ko = fixtures[(fixtures["stage"] == "knockout") & fixtures["played"]]
+    if not len(ko):
+        return out
+    b = model.betas["elo"] / model.sds["elo"]   # supremacy goals per Elo point (z is linear)
+    pre_lookup = {}
+    for row in pre.itertuples():
+        d = pd.Timestamp(row.date).date().isoformat()
+        pre_lookup[(row.home_team, row.away_team, d)] = (float(row.pre_elo_home),
+                                                         float(row.pre_elo_away))
+    for r in ko.itertuples():
+        if r.home not in power.index or r.away not in power.index:
+            continue
+        d = pd.Timestamp(r.date).date().isoformat()
+        pre_pair = pre_lookup.get((r.home_dn, r.away_dn, d))
+        if pre_pair is None:
+            continue
+        pre_h, pre_a = pre_pair
+        cur_h = float(elo.ratings.get(r.home_dn, 1500.0))   # Elo the power table actually used
+        cur_a = float(elo.ratings.get(r.away_dn, 1500.0))
+        sup = _supremacy(power, model, r.home, r.away) + b * ((pre_h - pre_a) - (cur_h - cur_a))
+        out[(r.home, r.away)] = {"supremacy": float(sup), **probs_from_supremacy(model, sup)}
+    return out
+
+
 def update_ledger(power: pd.DataFrame, model, fixtures: pd.DataFrame,
-                  run_date: str, path: str = LEDGER_PATH) -> dict:
+                  run_date: str, path: str = LEDGER_PATH, elo=None) -> dict:
     """Lock new pre-match predictions, attach results to matches that have since played.
+
+    Group fixtures are present in the feed before kickoff, so their forecast is locked while
+    unplayed and graded once the score lands. Knockout ties only ever enter the feed *already
+    finished*, so they get no pre-match lock; instead — when ``elo`` is supplied — their
+    pre-kickoff forecast is reconstructed (see :func:`_played_knockout_pre_probs`) so they grade
+    out-of-sample just like the group stage. A knockout tie recorded as contaminated by an
+    earlier run is re-based onto that honest forecast in place.
 
     Returns the up-to-date ledger (also written to ``path``).
     """
     ledger = load_ledger(path)
+    ko_pre = _played_knockout_pre_probs(power, model, elo, fixtures)
     for r in fixtures.itertuples():
         if r.home not in power.index or r.away not in power.index:
             continue
         key = _match_key(r.date, r.home, r.away)
         played = bool(r.played)
+        ko_pr = ko_pre.get((r.home, r.away)) if r.stage == "knockout" else None
 
-        if key not in ledger:
-            sup = _supremacy(power, model, r.home, r.away)
-            pr = probs_from_supremacy(model, sup)
-            ledger[key] = {
+        e = ledger.get(key)
+        if e is None:
+            if ko_pr is not None:                          # reconstructed pre-kickoff forecast
+                sup, pr, locked, recon = ko_pr["supremacy"], ko_pr, True, True
+            else:
+                sup = _supremacy(power, model, r.home, r.away)
+                pr, locked, recon = probs_from_supremacy(model, sup), not played, False
+            ledger[key] = e = {
                 "date": pd.Timestamp(r.date).date().isoformat(),
                 "home": r.home, "away": r.away,
                 "group": (None if pd.isna(r.group) else r.group), "stage": r.stage,
                 "predicted_at": run_date,
-                "locked_pre_match": not played,   # contaminated if the match already happened
+                "locked_pre_match": locked,   # contaminated if a group match already happened
+                "reconstructed": recon,       # knockout forecast rebuilt from pre-kickoff Elo
                 "supremacy": sup,
                 "p_home": pr["p_home"], "p_draw": pr["p_draw"], "p_away": pr["p_away"],
                 "exp_home": pr["exp_home"], "exp_away": pr["exp_away"],
                 "resolved": False,
             }
+        elif ko_pr is not None and not e.get("reconstructed") and not e.get("locked_pre_match", True):
+            # A knockout tie an earlier run recorded as contaminated (its only prediction had
+            # already absorbed the result via Elo). Re-base it on the honest pre-kickoff forecast
+            # so it grades out-of-sample like the rest of the track record.
+            e.update(supremacy=ko_pr["supremacy"], reconstructed=True, locked_pre_match=True,
+                     p_home=ko_pr["p_home"], p_draw=ko_pr["p_draw"], p_away=ko_pr["p_away"],
+                     exp_home=ko_pr["exp_home"], exp_away=ko_pr["exp_away"])
 
-        e = ledger[key]
         if played and not e.get("resolved"):
             hs, as_ = int(r.home_score), int(r.away_score)
             e.update(actual_home_score=hs, actual_away_score=as_,

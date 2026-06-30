@@ -131,8 +131,11 @@ def prepare_model(refresh=False, verbose=True):
     # Tracking is a non-essential overlay — never let it take down the whole forecast (e.g. a
     # read-only filesystem or a corrupt ledger), so degrade to empty/default metrics on failure.
     try:
+        # `elo` lets tracking reconstruct each played knockout tie's pre-kickoff forecast (its
+        # only feed prediction is contaminated, since the tie enters the feed already finished),
+        # so R32-onwards results grade out-of-sample like the group stage.
         ledger = tracking.update_ledger(power, model, fixtures,
-                                        run_date=_dt.date.today().isoformat())
+                                        run_date=_dt.date.today().isoformat(), elo=elo)
     except Exception as exc:  # noqa: BLE001 - tracking must never break the forecast
         log(f"[track] skipped (could not update ledger: {exc})")
         ledger = {}
