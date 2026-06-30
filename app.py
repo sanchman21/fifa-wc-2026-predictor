@@ -90,6 +90,7 @@ _BRACKET_CSS = """<style>
 .bt-team+.bt-team{border-top:1px solid rgba(128,128,128,.22);}
 .bt-win{font-weight:700;border-left-color:#c8102e;background:rgba(200,16,46,.12);}
 .bt-tbd{opacity:.4;font-style:italic;}
+.bt-proj{font-style:italic;opacity:.72;}
 .bt-pens{font-size:9px;opacity:.6;text-align:right;padding:0 9px 3px;letter-spacing:.03em;}
 </style>"""
 
@@ -116,14 +117,17 @@ def _bracket_display_order(bracket):
     return order
 
 
-def _bracket_team_row(team, label, score, is_winner):
+def _bracket_team_row(team, label, score, is_winner, projected=False):
     """One team line: name + score (if played), winner highlighted; an undecided side shows
-    its placeholder label ('TBD' or e.g. '3rd: C/D/F/G/H') dimmed."""
+    its placeholder label ('TBD' or e.g. '3rd: C/D/F/G/H') dimmed. A `projected` third-place
+    qualifier (group stage done, tie not yet played) is shown in italics with a tooltip."""
     if team is None:
         return f'<div class="bt-team bt-tbd"><span>{label or "TBD"}</span><span></span></div>'
-    cls = "bt-win" if is_winner else ""
+    cls = "bt-win" if is_winner else ("bt-proj" if projected else "")
+    tip = (' title="Projected 3rd-place qualifier — exact slot may differ from FIFA&#39;s allocation"'
+           if projected else "")
     sc = "" if score is None else str(score)
-    return f'<div class="bt-team {cls}"><span>{team}</span><span>{sc}</span></div>'
+    return f'<div class="bt-team {cls}"{tip}><span>{team}</span><span>{sc}</span></div>'
 
 
 def bracket_html(bracket, state):
@@ -141,7 +145,8 @@ def bracket_html(bracket, state):
             rows = (_bracket_team_row(home, info.get("home_label"), info.get("home_score"),
                                       home is not None and home == winner)
                     + _bracket_team_row(away, info.get("away_label"), info.get("away_score"),
-                                        away is not None and away == winner))
+                                        away is not None and away == winner,
+                                        projected=info.get("projected", False)))
             pens = '<div class="bt-pens">decided on penalties</div>' if info.get("pens") else ""
             cards.append(f'<div class="bt-match">{rows}{pens}</div>')
         cols.append(f'<div class="bt-col"><div class="bt-round">{_ROUND_TITLES[rnd]}</div>'
@@ -259,10 +264,12 @@ with tabs[0]:
     bstate = actual_bracket(fixtures, bracket, known_ko)
     n_ko_played = sum(1 for v in bstate.values() if v["played"])
     st.caption("The real knockout bracket from the actual group results — group winners and "
-               "runners-up are placed directly; each group winner's third-placed opponent appears "
-               "once that tie is played. Scores fill in as matches finish (penalty ties marked); "
-               f"undecided slots show **TBD** or the eligible third-place groups. {n_ko_played} "
-               "knockout match(es) played so far — scroll sideways to follow Round of 32 → Final.")
+               "runners-up are placed directly. Once the group stage is complete, each group "
+               "winner's third-placed opponent is filled in too (shown *italicised* — projected "
+               "from the best-8 thirds; a played tie always shows the real opponent). Scores fill "
+               "in as matches finish (penalty ties marked); slots still show **TBD** only while a "
+               f"group is unfinished. {n_ko_played} knockout match(es) played so far — scroll "
+               "sideways to follow Round of 32 → Final.")
     st.markdown(bracket_html(bracket, bstate), unsafe_allow_html=True)
 
     st.subheader("Title odds")
