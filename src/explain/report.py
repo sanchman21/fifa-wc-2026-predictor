@@ -60,19 +60,39 @@ def write_track_record(record: dict, calib: dict) -> str | None:
                      f"{calib['calibrated_scoreline_nll']:.3f})"
                      if calib["baseline_scoreline_nll"] is not None else "no data)"))
 
+    # Group (3-way win/draw/loss) and knockout (2-way advance/out) are scored separately: they
+    # have different coin-flip floors, so blending them into one skill number would misprice both.
+    bs = record.get("by_stage", {})
+    _STAGE_LABEL = {"group": "Group — 3-way win/draw/loss",
+                    "knockout": "Knockout — who advances (penalty edge included)"}
+    stage_rows = "\n".join(
+        f"| {_STAGE_LABEL.get(s, s)} | {m['n']} | {m['accuracy']:.0%} | {m['logloss']:.3f} "
+        f"| {m['baseline_logloss']:.3f} | {m['skill_pct']:+.0f}% |"
+        for s, m in sorted(bs.items())) or "| — | 0 | — | — | — |"
+
     md = f"""# Model Track Record
 
 *How the locked, pre-match predictions have actually fared as results came in.*
 
 - **Graded matches:** {record['n_graded']}  ·  **locked & pending:** {record['n_pending']}
-- **Outcome hit-rate:** {record['accuracy']:.1%}
+- **Hit-rate:** {record['accuracy']:.1%}
 - **Brier score:** {record['brier']:.3f}  (lower is better; 0 = perfect)
-- **Log-loss:** {record['logloss']:.3f}  vs {0.0:.0f}… coin-flip {1.0986:.3f}
-  → **{record['skill_pct']:+.0f}% skill** over a 3-way coin-flip
+- **Log-loss:** {record['logloss']:.3f} → **{record['skill_pct']:+.0f}% skill** vs a coin-flip
+  (each match vs its own floor — group 3-way {np.log(3):.3f}, knockout advance/out {np.log(2):.3f})
 - **Mean margin error:** {record['mean_goal_err']:.2f} goals/match (error in the goal *difference*)
 - **Goals/match:** {record['goals_actual']:.2f} actual vs {record['goals_pred']:.2f} predicted ({record['goals_bias']:+.2f} bias — positive means the model under-predicts goals)
-- **Draw rate:** {record['draw_rate_actual']:.0%} actual vs {record['draw_rate_pred']:.0%} predicted
+- **Draw rate (90'/120'):** {record['draw_rate_actual']:.0%} actual vs {record['draw_rate_pred']:.0%} predicted
 - {calib_line}
+
+## By stage
+
+Group matches are graded on the 3-way result; knockout ties on **who advances** (a level tie is
+resolved by the penalty edge, not scored as a draw). Each has its own coin-flip floor, so skill is
+reported separately.
+
+| Stage | Graded | Hit-rate | Log-loss | Coin-flip | Skill |
+|---|---|---|---|---|---|
+{stage_rows}
 
 ## Calibration (reliability)
 
