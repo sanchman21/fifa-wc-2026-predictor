@@ -133,9 +133,11 @@ def prepare_model(refresh=False, verbose=True):
     try:
         # `elo` lets tracking reconstruct each played knockout tie's pre-kickoff forecast (its
         # only feed prediction is contaminated, since the tie enters the feed already finished),
-        # so R32-onwards results grade out-of-sample like the group stage.
+        # so R32-onwards results grade out-of-sample like the group stage. `known_ko` says which
+        # side actually advanced, so knockouts are graded on advancement (penalty edge included).
         ledger = tracking.update_ledger(power, model, fixtures,
-                                        run_date=_dt.date.today().isoformat(), elo=elo)
+                                        run_date=_dt.date.today().isoformat(), elo=elo,
+                                        known_knockout=known_ko)
     except Exception as exc:  # noqa: BLE001 - tracking must never break the forecast
         log(f"[track] skipped (could not update ledger: {exc})")
         ledger = {}

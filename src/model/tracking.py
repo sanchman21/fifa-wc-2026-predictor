@@ -35,7 +35,7 @@ import numpy as np
 import pandas as pd
 
 from .match_model import scoreline_matrix, scoreline_prob
-from .predict import MIN_LAMBDA, _supremacy
+from .predict import MIN_LAMBDA, _pen_skill, _supremacy
 
 # Where the locked-prediction ledger lives. Defaults to the in-repo ``output/`` dir, but can be
 # pointed elsewhere via ``WC_LEDGER_PATH`` (useful on hosts that mount the repo read-only).
@@ -48,7 +48,11 @@ LEDGER_PATH = os.environ.get(
 _FALLBACK_PATH = os.path.join(tempfile.gettempdir(), "wc2026_prediction_log.json")
 
 _OUTCOMES = ("home", "draw", "away")
-_UNIFORM_LOGLOSS = math.log(3)            # skill baseline: a coin-flip over 3 outcomes
+# Skill baselines (a uniform coin-flip). Group matches are scored 3-way (win/draw/loss);
+# knockout ties are scored 2-way (which side ADVANCES), so their coin-flip floor is log(2).
+_UNIFORM_LOGLOSS = math.log(3)
+_UNIFORM_LOGLOSS_2WAY = math.log(2)
+_BASELINE = {"outcome": _UNIFORM_LOGLOSS, "advance": _UNIFORM_LOGLOSS_2WAY}
 
 
 # --------------------------------------------------------------------------- core math
@@ -91,31 +95,54 @@ def _match_key(date, home: str, away: str) -> str:
 
 # --------------------------------------------------------------------------- grading
 def grade_entry(e: dict) -> dict | None:
-    """Per-match scores for a resolved, genuinely-locked prediction (else ``None``)."""
+    """Per-match scores for a resolved, genuinely-locked prediction (else ``None``).
+
+    Group matches are scored on the 3-way 90' result (win/draw/loss). Knockout ties are scored
+    on who **advances** — a 2-way event that resolves a level result via the penalty edge — since
+    that, not the 90' win/draw/loss, is the outcome a knockout is actually deciding. ``basis`` and
+    ``pick`` (the probability the model gave its own pick) are returned so aggregation can apply
+    the right coin-flip baseline and reliability curve to each.
+    """
     if not e.get("resolved") or not e.get("locked_pre_match", True):
         return None
-    act = e["actual_outcome"]
     p = {o: e[f"p_{o}"] for o in _OUTCOMES}
-    pred = max(p, key=p.get)
     eps = 1e-12
-    brier = sum((p[o] - (1.0 if o == act else 0.0)) ** 2 for o in _OUTCOMES)
-    logloss = -math.log(max(eps, p[act]))
     total_pred = e["exp_home"] + e["exp_away"]
     total_actual = e["actual_home_score"] + e["actual_away_score"]
-    return {
-        "predicted": pred,
-        "actual": act,
-        "correct": int(pred == act),
-        "p_actual": p[act],
+    goal_bits = {
         "p_draw": e["p_draw"],
-        "brier": brier,
-        "logloss": logloss,
         # margin error (goal difference) vs total-goals error (volume) — tracked separately
         "abs_goal_err": abs((e["exp_home"] - e["exp_away"])
                             - (e["actual_home_score"] - e["actual_away_score"])),
         "total_pred": total_pred,
         "total_actual": total_actual,
         "total_err": total_actual - total_pred,   # +ve ⇒ the model under-predicted goals
+    }
+
+    if e.get("stage") == "knockout" and e.get("p_home_pens") is not None:
+        adv = e.get("advanced")                       # 'home'/'away' side that actually progressed
+        if adv is None:
+            return None                               # shootout winner unknown -> can't score it
+        pp = float(e["p_home_pens"])                  # model's P(home wins a shootout)
+        padv = {"home": p["home"] + p["draw"] * pp,
+                "away": p["away"] + p["draw"] * (1.0 - pp)}
+        pred = "home" if padv["home"] >= padv["away"] else "away"
+        return {
+            "predicted": pred, "actual": adv, "correct": int(pred == adv),
+            "p_actual": padv[adv], "pick": padv[pred], "basis": "advance",
+            "brier": sum((padv[o] - (1.0 if o == adv else 0.0)) ** 2 for o in ("home", "away")),
+            "logloss": -math.log(max(eps, padv[adv])),
+            **goal_bits,
+        }
+
+    act = e["actual_outcome"]
+    pred = max(p, key=p.get)
+    return {
+        "predicted": pred, "actual": act, "correct": int(pred == act),
+        "p_actual": p[act], "pick": p[pred], "basis": "outcome",
+        "brier": sum((p[o] - (1.0 if o == act else 0.0)) ** 2 for o in _OUTCOMES),
+        "logloss": -math.log(max(eps, p[act])),
+        **goal_bits,
     }
 
 
@@ -192,12 +219,30 @@ def _played_knockout_pre_probs(power: pd.DataFrame, model, elo, fixtures: pd.Dat
         cur_h = float(elo.ratings.get(r.home_dn, 1500.0))   # Elo the power table actually used
         cur_a = float(elo.ratings.get(r.away_dn, 1500.0))
         sup = _supremacy(power, model, r.home, r.away) + b * ((pre_h - pre_a) - (cur_h - cur_a))
-        out[(r.home, r.away)] = {"supremacy": float(sup), **probs_from_supremacy(model, sup)}
+        # Penalty edge (static, from historical shootout skill — no in-tournament contamination),
+        # so a level result can be graded on who ADVANCES rather than scored as a 90' draw.
+        p_home_pens = 1.0 / (1.0 + math.exp(-(_pen_skill(power, r.home) - _pen_skill(power, r.away))))
+        out[(r.home, r.away)] = {"supremacy": float(sup), "p_home_pens": float(p_home_pens),
+                                 **probs_from_supremacy(model, sup)}
     return out
 
 
+def _advanced_side(home: str, away: str, hs: int, as_: int, known_knockout: dict | None) -> str | None:
+    """Which side ('home'/'away') progressed: the shootout winner if the tie was level, else the
+    90'/120' winner. ``None`` when a level tie's shootout result isn't known yet."""
+    winner = (known_knockout or {}).get((home, away))
+    if winner is None and hs != as_:
+        winner = home if hs > as_ else away          # decisive tie needs no shootout map
+    if winner == home:
+        return "home"
+    if winner == away:
+        return "away"
+    return None
+
+
 def update_ledger(power: pd.DataFrame, model, fixtures: pd.DataFrame,
-                  run_date: str, path: str = LEDGER_PATH, elo=None) -> dict:
+                  run_date: str, path: str = LEDGER_PATH, elo=None,
+                  known_knockout: dict | None = None) -> dict:
     """Lock new pre-match predictions, attach results to matches that have since played.
 
     Group fixtures are present in the feed before kickoff, so their forecast is locked while
@@ -205,7 +250,9 @@ def update_ledger(power: pd.DataFrame, model, fixtures: pd.DataFrame,
     finished*, so they get no pre-match lock; instead — when ``elo`` is supplied — their
     pre-kickoff forecast is reconstructed (see :func:`_played_knockout_pre_probs`) so they grade
     out-of-sample just like the group stage. A knockout tie recorded as contaminated by an
-    earlier run is re-based onto that honest forecast in place.
+    earlier run is re-based onto that honest forecast in place. ``known_knockout`` (``{(home,
+    away): winner}``, shootouts resolved) records which side actually advanced, so a knockout is
+    graded on advancement rather than the 90' result.
 
     Returns the up-to-date ledger (also written to ``path``).
     """
@@ -216,7 +263,8 @@ def update_ledger(power: pd.DataFrame, model, fixtures: pd.DataFrame,
             continue
         key = _match_key(r.date, r.home, r.away)
         played = bool(r.played)
-        ko_pr = ko_pre.get((r.home, r.away)) if r.stage == "knockout" else None
+        is_ko = r.stage == "knockout"
+        ko_pr = ko_pre.get((r.home, r.away)) if is_ko else None
 
         e = ledger.get(key)
         if e is None:
@@ -249,6 +297,15 @@ def update_ledger(power: pd.DataFrame, model, fixtures: pd.DataFrame,
             hs, as_ = int(r.home_score), int(r.away_score)
             e.update(actual_home_score=hs, actual_away_score=as_,
                      actual_outcome=outcome(hs, as_), resolved=True)
+
+        # Knockout: attach the penalty edge + who actually advanced so grading can score the
+        # 2-way ADVANCEMENT. Idempotent, and backfills entries written before this existed.
+        if is_ko:
+            if ko_pr is not None and e.get("p_home_pens") is None:
+                e["p_home_pens"] = ko_pr["p_home_pens"]
+            if played and e.get("advanced") is None:
+                e["advanced"] = _advanced_side(r.home, r.away, int(r.home_score),
+                                               int(r.away_score), known_knockout)
     save_ledger(ledger, path)
     return ledger
 
@@ -264,9 +321,10 @@ def graded_frame(ledger: dict) -> pd.DataFrame:
         rows.append({
             "date": e["date"], "match": f"{e['home']} v {e['away']}",
             "stage": e["stage"],
-            "pick": e[f"p_{g['predicted']}"], "predicted": g["predicted"], "actual": g["actual"],
+            "pick": g["pick"], "predicted": g["predicted"], "actual": g["actual"],
             "score": f"{e['actual_home_score']}-{e['actual_away_score']}",
-            **{k: g[k] for k in ("correct", "p_actual", "p_draw", "brier", "logloss",
+            "was_draw": int(e["actual_home_score"] == e["actual_away_score"]),
+            **{k: g[k] for k in ("basis", "correct", "p_actual", "p_draw", "brier", "logloss",
                                  "abs_goal_err", "total_pred", "total_actual", "total_err")},
         })
     df = pd.DataFrame(rows)
@@ -287,30 +345,54 @@ def calibration_bins(df: pd.DataFrame, edges=(0.0, 0.4, 0.5, 0.6, 0.7, 0.8, 1.01
 
 
 def track_record(ledger: dict) -> dict:
-    """Headline success metrics over all graded matches."""
+    """Headline success metrics over all graded matches.
+
+    Group matches are 3-way (win/draw/loss) and knockout ties are 2-way (advance/out), so each
+    match is scored against its OWN coin-flip baseline — log(3) or log(2) — and skill is the
+    reduction in log-loss versus that floor (summed, so the two never blend into a wrong baseline).
+    ``by_stage`` reports the group and knockout records separately.
+    """
     df = graded_frame(ledger)
     n = len(df)
     n_pending = sum(1 for e in ledger.values()
                     if e.get("locked_pre_match", True) and not e.get("resolved"))
     if not n:
-        return {"n_graded": 0, "n_pending": n_pending, "frame": df}
+        return {"n_graded": 0, "n_pending": n_pending, "by_stage": {}, "frame": df}
+    df = df.copy()
+    df["baseline"] = df["basis"].map(_BASELINE).fillna(_UNIFORM_LOGLOSS)
     logloss = float(df["logloss"].mean())
+
+    def _skill(sub):   # % reduction in log-loss vs each match's own coin-flip floor
+        return 100.0 * (1 - sub["logloss"].sum() / sub["baseline"].sum())
+
+    by_stage = {
+        stage_name: {
+            "n": int(len(sub)),
+            "accuracy": float(sub["correct"].mean()),
+            "logloss": float(sub["logloss"].mean()),
+            "baseline_logloss": float(sub["baseline"].mean()),
+            "skill_pct": _skill(sub),
+            "basis": sub["basis"].iloc[0] if sub["basis"].nunique() == 1 else "mixed",
+        }
+        for stage_name, sub in df.groupby("stage")
+    }
     return {
         "n_graded": n,
         "n_pending": n_pending,
         "accuracy": float(df["correct"].mean()),
         "brier": float(df["brier"].mean()),
         "logloss": logloss,
-        "logloss_vs_uniform": _UNIFORM_LOGLOSS - logloss,   # >0 ⇒ better than a coin-flip
-        "skill_pct": 100.0 * (1 - logloss / _UNIFORM_LOGLOSS),
+        "logloss_vs_uniform": float(df["baseline"].mean()) - logloss,   # >0 ⇒ better than a coin-flip
+        "skill_pct": _skill(df),
         "mean_goal_err": float(df["abs_goal_err"].mean()),   # mean |margin| error (goal diff)
         # goal-volume diagnostics: are real matches out-scoring the model, and is the draw rate right?
         "goals_pred": float(df["total_pred"].mean()),
         "goals_actual": float(df["total_actual"].mean()),
         "goals_bias": float(df["total_err"].mean()),         # +ve ⇒ model under-predicts goals
-        "draw_rate_pred": float(df["p_draw"].mean()),        # model's mean P(draw)
-        "draw_rate_actual": float((df["actual"] == "draw").mean()),
+        "draw_rate_pred": float(df["p_draw"].mean()),        # model's mean P(90' draw)
+        "draw_rate_actual": float(df["was_draw"].mean()),    # share of matches level after 90'/120'
         "calibration": calibration_bins(df),
+        "by_stage": by_stage,
         "frame": df,
     }
 

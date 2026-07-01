@@ -339,8 +339,10 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("How the model's own predictions have scored")
     st.caption("Every WC-2026 prediction is *locked* while the match is unplayed, then graded "
-               "when the real score arrives — so this is a genuine out-of-sample record, not "
-               "hindsight. The learned calibration scale (sidebar) is fit from exactly these results.")
+               "when the real score arrives — a genuine out-of-sample record, not hindsight. "
+               "Knockout ties (which only reach the feed once finished) are graded on the forecast "
+               "the model would have made at kickoff, scored on who *advances* — a level tie is "
+               "resolved by the penalty edge, not counted as a draw.")
     if not track["n_graded"]:
         st.info(f"No matches graded yet — **{track['n_pending']}** pre-match prediction(s) are "
                 "locked in and waiting for results. Click **🔄 Refresh data** once matches are "
@@ -348,12 +350,24 @@ with tabs[2]:
     else:
         k = st.columns(4)
         k[0].metric("Matches graded", track["n_graded"], f"{track['n_pending']} pending")
-        k[1].metric("Outcome hit-rate", pct(track["accuracy"]))
+        k[1].metric("Hit-rate", pct(track["accuracy"]))
         k[2].metric("Log-loss", f"{track['logloss']:.3f}", f"{track['skill_pct']:+.0f}% skill vs coin-flip",
                     delta_color="normal")
         k[3].metric("Brier score", f"{track['brier']:.3f}", help="0 = perfect, lower is better")
         st.caption(f"Mean margin error: {track['mean_goal_err']:.2f} goals/match (error in the goal "
-                   f"*difference*). A 3-way coin-flip scores log-loss {1.0986:.3f}.")
+                   "*difference*). Skill is vs each match's own coin-flip floor — 3-way (1.099) for "
+                   "group matches, 2-way (0.693) for knockout advancement.")
+
+        bs = track.get("by_stage", {})
+        if bs:
+            _LBL = {"group": "Group — 3-way win/draw/loss",
+                    "knockout": "Knockout — who advances (penalty edge)"}
+            st.markdown("##### By stage — scored separately (different coin-flip floors)")
+            sc = st.columns(len(bs))
+            for col, (s, m) in zip(sc, sorted(bs.items())):
+                col.metric(_LBL.get(s, s), f"{m['skill_pct']:+.0f}% skill",
+                           f"{m['n']} graded · {m['accuracy']:.0%} hit · log-loss {m['logloss']:.3f}",
+                           delta_color="off")
 
         st.markdown("##### Goal volume & draws — is the model scoring the right *amount*?")
         g2 = st.columns(2)
@@ -411,6 +425,9 @@ with tabs[2]:
         st.dataframe(show.style.format({"confidence": "{:.0%}", "P(actual)": "{:.0%}",
                      "brier": "{:.3f}", "logloss": "{:.3f}"}),
                      use_container_width=True, hide_index=True, height=360)
+        st.caption("Knockout rows are scored on advancement: *predicted*/*actual* is the side that "
+                   "goes through (penalty edge included) and *confidence* is its advance probability; "
+                   "group rows are the 3-way result. The *score* column is always the 90'/120' result.")
         st.download_button("⬇ track_record.csv", df.to_csv(index=False).encode(),
                            "track_record.csv", "text/csv")
 
